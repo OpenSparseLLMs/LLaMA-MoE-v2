@@ -164,6 +164,8 @@ class MixtralConfig(PretrainedConfig):
         num_local_experts=8,
         output_router_logits=False,
         router_aux_loss_coef=0.001,
+        act_rescale=True,
+        enable_megablocks=True,
         **kwargs,
     ):
         self.vocab_size = vocab_size
@@ -173,6 +175,9 @@ class MixtralConfig(PretrainedConfig):
         self.num_hidden_layers = num_hidden_layers
         self.num_attention_heads = num_attention_heads
         self.sliding_window = sliding_window
+
+        self.act_rescale = act_rescale
+        self.enable_megablocks = enable_megablocks
 
         # for backward compatibility
         if num_key_value_heads is None:
