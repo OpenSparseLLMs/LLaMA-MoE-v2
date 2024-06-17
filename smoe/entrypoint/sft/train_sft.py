@@ -12,6 +12,7 @@ from torch.utils.data import Dataset
 from transformers import PreTrainedTokenizer, Trainer
 from transformers.trainer_pt_utils import LabelSmoother
 
+from smoe.models.mixtral import MixtralConfig, MixtralForCausalLM
 from smoe.utils.conversation import Conversation
 from smoe.utils.io import load_json, load_jsonlines
 
@@ -344,6 +345,9 @@ def get_model(
     if model_type == "auto":
         ConfigClass = transformers.AutoConfig
         ModelClass = transformers.AutoModelForCausalLM
+    elif model_type == "v2_mixtral":
+        ConfigClass = MixtralConfig
+        ModelClass = MixtralForCausalLM
     else:
         raise ValueError(f"Unknown model type: {model_type}")
 
@@ -353,6 +357,7 @@ def get_model(
         cache_dir=cache_dir,
         trust_remote_code=trust_remote_code,
     )
+    config._attn_implementation = attn_impl
     orig_ctx_len = getattr(config, "max_position_embeddings", None)
     if orig_ctx_len and model_max_length > orig_ctx_len:
         scaling_factor = float(math.ceil(model_max_length / orig_ctx_len))
@@ -369,7 +374,6 @@ def get_model(
         cache_dir=cache_dir,
         torch_dtype=torch_dtype,
         trust_remote_code=trust_remote_code,
-        attn_implementation=attn_impl,
     )
     logger.info("model ready")
 
@@ -421,6 +425,8 @@ def train():
     model_args: ModelArguments
     data_args: DataArguments
     training_args: TrainingArguments
+    if "tensorboard" not in training_args.report_to:
+        training_args.report_to.append("tensorboard")
     logger.info(f"model_args: {model_args}")
     logger.info(f"data_args: {data_args}")
     logger.info(f"training_args: {training_args}")
@@ -439,8 +445,13 @@ def train():
     )
     if training_args.freeze_gate:
         for name, param in model.named_parameters():
-            if "gate" in name:
+            if ".gate." in name:
                 param.requires_grad = False
+    tot_params = 0
+    for name, param in model.named_parameters():
+        print(name, param.shape, param.numel())
+        tot_params += param.numel()
+    logger.info(f"Total model params: {tot_params}")
 
     train_dataset = None
     datapath = pathlib.Path(data_args.dataset_dir_or_path)

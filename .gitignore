@@ -176,3 +176,4 @@ smoe/entrypoint/analysis/gating_*.py
 /logs-cpt/
 /tensorboard/
 models/
+wandb/
