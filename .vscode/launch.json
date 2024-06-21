@@ -5,18 +5,26 @@
     "version": "0.2.0",
     "configurations": [
         {
+            "name": "Python Debugger: Current File",
+            "type": "debugpy",
+            "request": "launch",
+            "program": "${file}",
+            "console": "integratedTerminal",
+            "justMyCode": false
+        },
+        {
             "name": "tokenize",
-            "type": "python",
+            "type": "debugpy",
             "request": "launch",
             "module": "smoe.utils.tokenize",
             "justMyCode": true
         },
         {
             "name": "Python: Remote Attach",
-            "type": "python",
+            "type": "debugpy",
             "request": "attach",
             "connect": {
-                "host": "x.x.x.x",
+                "host": "SH-IDCA1404-10-140-54-7",
                 "port": 5678
             },
             "pathMappings": [

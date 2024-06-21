@@ -13,7 +13,8 @@ from transformers import PreTrainedTokenizer, Trainer
 from transformers.trainer_pt_utils import LabelSmoother
 
 from smoe.models.mixtral import MixtralConfig, MixtralForCausalLM
-from smoe.utils.conversation import Conversation
+from smoe.utils.conversation import Llama3ConversationTemplate
+from smoe.utils.gpu_mem_track import MemTracker
 from smoe.utils.io import load_json, load_jsonlines
 
 IGNORE_TOKEN_ID = LabelSmoother.ignore_index
@@ -108,29 +109,11 @@ def preprocess(
     instances,
     tokenizer: transformers.PreTrainedTokenizer,
 ) -> Dict:
-    tokenizer_legacy = getattr(tokenizer, "legacy", True)
-    conv = Conversation()
-    conv.sep2 = tokenizer.eos_token
-    roles = {"human": conv.roles[0], "gpt": conv.roles[1]}
-
     # Apply prompt templates
     conversations = []
     for i, ins in enumerate(instances):
-        if roles[ins["conversations"][0]["from"]] != roles["human"]:
-            # Skip the first one if it is not from human
-            ins["conversations"] = ins["conversations"][1:]
-
-        conv.clear_msg()
-        sys_msg = ins.get("system_prompt")
-        if sys_msg is not None:
-            conv.set_system_message(sys_msg)
-        else:
-            conv.set_system_message("")
-        for j, turn in enumerate(ins["conversations"]):
-            role = roles[turn["from"]]
-            assert role == conv.roles[j % 2], f"{i}/{j}"
-            conv.append_message(role, turn["value"])
-        conversations.append(conv.get_prompt())
+        prompt = Llama3ConversationTemplate.parse(ins["conversations"])
+        conversations.append(prompt)
 
     # Tokenize conversations
     res = tokenizer(
@@ -143,64 +126,6 @@ def preprocess(
     input_ids = res["input_ids"]
     attention_masks = res["attention_mask"]
     targets = input_ids.clone()
-
-    # Mask targets. Only compute loss on the assistant outputs.
-    sep = conv.sep + conv.roles[1] + ": "
-    # attention_masks = torch.ones_like(input_ids)
-    for conversation, target, attention_mask in zip(
-        conversations, targets, attention_masks
-    ):
-        turns = conversation.split(conv.sep2)
-        # the eos token is included in `total_len`, llama2 will add bos token
-        # total_len = int(target.ne(tokenizer.pad_token_id).sum()) + len(turns) * int(tokenizer.pad_token == tokenizer.eos_token)
-        # attention_mask[total_len:] = 0
-        total_len = attention_mask.sum()
-
-        cur_len = 0
-        has_bos = False
-        if target[0] == tokenizer.bos_token_id:
-            cur_len = 1
-            target[:cur_len] = IGNORE_TOKEN_ID  # bos token
-            has_bos = True
-        for i, turn in enumerate(turns):
-            if turn == "":
-                break
-            # +1: add sep2 token
-            turn_len = len(tokenizer(turn).input_ids) - int(has_bos) + 1
-
-            # sep: " ASSISTANT: "
-            parts = turn.split(sep)
-            if len(parts) != 2:
-                break
-            parts[0] += sep
-            # "-2" is hardcoded for the Llama tokenizer to make the offset correct: bos and the last space token
-            # -1 means remove extra suffix space in sep
-            instruction_len = len(tokenizer(parts[0]).input_ids) - int(has_bos) - 1
-
-            if i != 0 and not tokenizer_legacy:
-                # The legacy and non-legacy modes handle special tokens differently
-                instruction_len -= 1
-
-            # Ignore the user instructions
-            target[cur_len : cur_len + instruction_len] = IGNORE_TOKEN_ID
-            cur_len += turn_len
-            # if i < len(turns) - 1:
-            #     # plus one for sep2 token (eos)
-            #     cur_len += 1
-
-            if i != 0 and not tokenizer_legacy:
-                # The legacy and non-legacy modes handle special tokens differently
-                cur_len -= 1
-
-        target[cur_len:] = IGNORE_TOKEN_ID
-
-        if cur_len < tokenizer.model_max_length:
-            if cur_len != total_len:
-                target[:] = IGNORE_TOKEN_ID
-                logger.info(
-                    f"WARNING: tokenization mismatch: {cur_len} vs. {total_len}."
-                    f" #turn = {len(turns) - 1}. (ignored)"
-                )
 
     return dict(
         input_ids=input_ids,
@@ -375,6 +300,7 @@ def get_model(
         torch_dtype=torch_dtype,
         trust_remote_code=trust_remote_code,
     )
+
     # model = ModelClass(config)
     logger.info("model ready")
 
@@ -432,6 +358,11 @@ def train():
     logger.info(f"data_args: {data_args}")
     logger.info(f"training_args: {training_args}")
 
+    import os
+
+    tracker = MemTracker(device=int(os.getenv("RANK", 0)))
+    tracker.track()
+
     model, tokenizer = get_model_and_tokenizer(
         model_args.model_type,
         model_args.model_name_or_path,
@@ -450,9 +381,11 @@ def train():
                 param.requires_grad = False
     tot_params = 0
     for name, param in model.named_parameters():
-        print(name, param.shape, param.numel())
+        # logger.info(name, param.shape, param.numel())
         tot_params += param.numel()
     logger.info(f"Total model params: {tot_params}")
+
+    tracker.track()
 
     train_dataset = None
     datapath = pathlib.Path(data_args.dataset_dir_or_path)
@@ -501,3 +434,19 @@ def train():
 
 if __name__ == "__main__":
     train()
+
+    # from tqdm import tqdm
+    # tokenizer = get_tokenizer("resources/llama-3-8b-mixtral-megablocks-56e-top8")
+    # train_dataset = CachedJsonlDataset(
+    #     "resources/OpenHermes-2.5/openhermes2_5.jsonl",
+    #     tokenizer,
+    #     seed=1227,
+    # )
+    # tok_lens = []
+    # for ins in tqdm(train_dataset):
+    #     tok_lens.append(ins["input_ids"].shape[0])
+    # print(np.mean(tok_lens), np.std(tok_lens))
+    # import matplotlib.pyplot as plt
+    # plt.hist(tok_lens, bins=100)
+    # plt.savefig("tok_lens.png")
+    # plt.close()

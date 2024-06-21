@@ -25,11 +25,16 @@ import warnings
 from dataclasses import dataclass
 from typing import Callable, List, Optional, Tuple, Union
 
+import stk
 import torch
 import torch.nn.functional as F
 import torch.utils.checkpoint
+from megablocks.layers import common, mpu
+from megablocks.layers.activation_fn import act_fn as megablocks_act_fn
 from megablocks.layers.arguments import Arguments as MegablocksArguments
+from megablocks.layers.dmlp_registry import _REGISTRY
 from megablocks.layers.dmoe import ParallelDroplessMLP
+from megablocks.layers.mlp import SparseMLP, create_dmoe_expert_weights, resolve_dtensor
 from packaging import version
 from torch import nn
 from torch.nn import BCEWithLogitsLoss, CrossEntropyLoss, MSELoss
@@ -976,9 +981,11 @@ class MixtralSparseMoeBlock(nn.Module):
                 hidden_size=self.hidden_dim,
                 ffn_hidden_size=self.ffn_dim,
                 moe_num_experts=self.num_experts,
+                moe_top_k=self.top_k,
                 activation_fn={"silu": F.silu}[config.hidden_act],
                 mlp_type="glu",
-                mlp_impl="sparse",
+                mlp_impl="grouped",
+                memory_optimized_mlp=True,
                 bias=False,
             )
             self.experts = ParallelDroplessMLP(args)
@@ -1040,9 +1047,10 @@ class MixtralSparseMoeBlock(nn.Module):
                 final_hidden_states.index_add_(
                     0, top_x, current_hidden_states.to(hidden_states.dtype)
                 )
-            final_hidden_states = final_hidden_states.reshape(
-                batch_size, sequence_length, hidden_dim
-            )
+
+        final_hidden_states = final_hidden_states.reshape(
+            batch_size, sequence_length, hidden_dim
+        )
 
         if self.act_rescale:
             final_hidden_states *= self.num_experts / self.top_k

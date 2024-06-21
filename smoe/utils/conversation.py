@@ -112,3 +112,48 @@ class Conversation:
             "messages": self.messages,
             "offset": self.offset,
         }
+
+
+class Llama3ConversationTemplate(Conversation):
+    def __init__(self):
+        super().__init__()
+
+        # The name of this template
+        self.name: str = "llama3-chat"
+        # The template of the system prompt
+        self.message_template: str = (
+            "<|start_header_id|>{role}<|end_header_id|>\n\n{message}<|eot_id|>"
+        )
+        self.gen_template: str = "<|start_header_id|>{role}<|end_header_id|>"
+        # The names of two roles
+        self.fs_to_role = {"human": "user", "gpt": "assistant", "system": "system"}
+        # All messages. Each item is (role, message).
+        self.messages: List[List[str]] = []
+        # The number of few shot examples
+        self.offset: int = 0
+        self.eot: str = "<|eot_id|>"
+        self.eos: str = "<|end_of_text|>"
+        # Stop criteria (the default one is EOS token)
+        self.stop_str: Union[str, List[str]] = [self.eot, self.eos]
+        # Stops generation if meeting any token in this list
+        self.stop_token_ids: List[int] = [128009, 128001]
+
+    def get_prompt(self, add_eos: bool = False) -> str:
+        """Get the prompt for generation."""
+        ret = ""
+        for role, message in self.messages:
+            ctxt_role = self.fs_to_role[role]
+            if message:
+                ret += self.message_template.format(role=ctxt_role, message=message)
+            else:
+                ret += self.gen_template.format(role=ctxt_role)
+        if add_eos:
+            ret += self.eos
+        return ret
+
+    @classmethod
+    def parse(cls, messages: list, add_eos: bool = False) -> str:
+        conv = cls()
+        for j, turn in enumerate(messages):
+            conv.append_message(turn["from"], turn["value"])
+        return conv.get_prompt(add_eos=add_eos)
