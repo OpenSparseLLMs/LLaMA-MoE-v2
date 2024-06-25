@@ -3,5 +3,13 @@
         "tests"
     ],
     "python.testing.unittestEnabled": false,
-    "python.testing.pytestEnabled": true
+    "python.testing.pytestEnabled": true,
+    "C_Cpp.default.includePath": [
+        "/mnt/petrelfs/share/gcc-10.1.0/include/c++/10.1.0/",
+        "/mnt/petrelfs/share_data/llm_env/miniconda3-py39_4/envs/llm-flash2.0/lib/python3.10/site-packages/torch/include/"
+    ],
+    "files.associations": {
+        "*.jsonl": "jsonc",
+        "iostream": "cpp"
+    }
 }

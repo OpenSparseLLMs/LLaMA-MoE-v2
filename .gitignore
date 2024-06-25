@@ -181,3 +181,4 @@ trace*.json
 tmp.json
 *gpu_mem_track.txt
 .vscode/launch.json
+scattermoe/

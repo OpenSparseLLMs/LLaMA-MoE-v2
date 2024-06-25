@@ -14,7 +14,6 @@ from transformers.trainer_pt_utils import LabelSmoother
 
 from smoe.models.mixtral import MixtralConfig, MixtralForCausalLM
 from smoe.utils.conversation import Llama3ConversationTemplate
-from smoe.utils.gpu_mem_track import MemTracker
 from smoe.utils.io import load_json, load_jsonlines
 
 IGNORE_TOKEN_ID = LabelSmoother.ignore_index
@@ -358,11 +357,6 @@ def train():
     logger.info(f"data_args: {data_args}")
     logger.info(f"training_args: {training_args}")
 
-    import os
-
-    tracker = MemTracker(device=int(os.getenv("RANK", 0)))
-    tracker.track()
-
     model, tokenizer = get_model_and_tokenizer(
         model_args.model_type,
         model_args.model_name_or_path,
@@ -385,8 +379,6 @@ def train():
         tot_params += param.numel()
     logger.info(f"Total model params: {tot_params}")
 
-    tracker.track()
-
     train_dataset = None
     datapath = pathlib.Path(data_args.dataset_dir_or_path)
     if not datapath.exists():
@@ -402,6 +394,9 @@ def train():
         raise ValueError(f"Unknown dataset path type: {datapath}")
     logger.info("train dataset ready")
 
+    # print("starting memory tracking...")
+    # torch.cuda.memory._record_memory_history(enabled=True, trace_alloc_record_context=True, _enable_expensive_cpp=True)
+    # print("starting memory tracking...ok")
     trainer = Trainer(
         model=model,
         tokenizer=tokenizer,

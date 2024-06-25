@@ -3,6 +3,8 @@
 #SBATCH --job-name=mb_64e_top8
 #SBATCH --output=logs/%x-%j.log
 #SBATCH --error=logs/%x-%j.log
+##SBATCH --output=logs/%x.log
+##SBATCH --error=logs/%x.log
 
 #SBATCH --partition=MoE
 #SBATCH --ntasks-per-node=1
@@ -18,12 +20,14 @@ export WANDB_PROJECT="v2-mixtral"
 
 {
     task_name=$SLURM_JOB_NAME
-    model_type="v2_mixtral"
+    model_type="auto"
+    dataset_dir_or_path="resources/OpenHermes-2.5/openhermes2_5.jsonl"
+
     # model_name_or_path="/mnt/petrelfs/zhutong/smoe/resources/llama-3-8b-mixtral-no-megablocks"
     # model_name_or_path="/mnt/petrelfs/zhutong/smoe/resources/llama-3-8b-mixtral-megablocks"
-    model_name_or_path="/mnt/petrelfs/zhutong/smoe/resources/llama-3-8b-mixtral-megablocks-56e-top8"
+    # model_name_or_path="/mnt/petrelfs/zhutong/smoe/resources/llama-3-8b-mixtral-megablocks-56e-top8"
     # model_name_or_path="/mnt/petrelfs/zhutong/smoe/resources/llama-3-8b-mixtral-no-megablocks-56e-top8"
-    dataset_dir_or_path="resources/OpenHermes-2.5/openhermes2_5.jsonl"
+    model_name_or_path="/mnt/petrelfs/zhutong/smoe/resources/llama-3-8b-mixtral-scattermoe-56e-top8"
 
     comment="llama-3-8b-instruct to mixtral-no-megablocks, 64 experts, top8"
     base_dir="outputs/v2_mixtral"
@@ -70,7 +74,7 @@ export WANDB_PROJECT="v2-mixtral"
             --num_train_epochs 3 \
             --save_strategy steps \
             --save_steps 1000 \
-            --save_total_limit 3 \
+            --save_total_limit 1 \
             --learning_rate 2e-5 \
             --weight_decay 0. \
             --warmup_ratio 0.03 \

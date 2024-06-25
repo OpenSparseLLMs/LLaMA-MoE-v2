@@ -23,18 +23,20 @@ import inspect
 import math
 import warnings
 from dataclasses import dataclass
-from typing import Callable, List, Optional, Tuple, Union
+from typing import List, Optional, Tuple, Union
 
 import stk
 import torch
 import torch.nn.functional as F
 import torch.utils.checkpoint
-from megablocks.layers import common, mpu
-from megablocks.layers.activation_fn import act_fn as megablocks_act_fn
+from megablocks import grouped_gemm_util as gg
+from megablocks.layers import mpu
+from megablocks.layers.activation_fn import act_fn
 from megablocks.layers.arguments import Arguments as MegablocksArguments
 from megablocks.layers.dmlp_registry import _REGISTRY
 from megablocks.layers.dmoe import ParallelDroplessMLP
-from megablocks.layers.mlp import SparseMLP, create_dmoe_expert_weights, resolve_dtensor
+from megablocks.layers.glu import memory_optimized_grouped_glu
+from megablocks.layers.mlp import resolve_dtensor
 from packaging import version
 from torch import nn
 from torch.nn import BCEWithLogitsLoss, CrossEntropyLoss, MSELoss
@@ -50,6 +52,7 @@ from transformers.utils import (
 )
 from transformers.utils.import_utils import is_torch_fx_available
 
+import scattermoe
 from smoe.utils.cache_utils import Cache, DynamicCache
 from smoe.utils.modeling_attn_mask_utils import _prepare_4d_causal_attention_mask
 
@@ -945,6 +948,109 @@ MISTRAL_ATTENTION_CLASSES = {
 }
 
 
+class SimplifiedSparseGLU(nn.Module):
+    def __init__(self, args: MegablocksArguments):
+        super().__init__()
+        self.args = args
+
+        if args.bf16:
+            torch_dtype = torch.bfloat16
+        elif args.fp16:
+            torch_dtype = torch.float16
+        else:
+            torch_dtype = None
+
+        # gate
+        self.w1 = nn.Parameter(
+            torch.empty(
+                args.ffn_hidden_size * args.moe_num_experts,
+                args.hidden_size,
+                dtype=torch_dtype,
+            )
+        )
+        # down
+        self.w2 = nn.Parameter(
+            torch.empty(
+                args.ffn_hidden_size * args.moe_num_experts,
+                args.hidden_size,
+                dtype=torch_dtype,
+            )
+        )
+        # up
+        self.v1 = nn.Parameter(
+            torch.empty(
+                args.ffn_hidden_size * args.moe_num_experts,
+                args.hidden_size,
+                dtype=torch_dtype,
+            )
+        )
+
+        self.act_fn = args.activation_fn
+
+    def forward(self, x, topo):
+        if self.args.memory_optimized_mlp:
+            raise NotImplementedError(
+                "Memory optimized implementation not yet supported with GLU with sparse kernels."
+            )
+
+        w1, v1, w2 = (
+            resolve_dtensor(self.w1),
+            resolve_dtensor(self.v1),
+            resolve_dtensor(self.w2),
+        )
+
+        # Compute the GLU.
+        x1 = stk.ops.sdd(x, w1.t(), topo)
+        x2 = stk.ops.sdd(x, v1.t(), topo)
+
+        activation_fn_out = act_fn(x1, self.act_fn)
+        x1 = stk.ops.mul(activation_fn_out, x2)
+
+        return stk.ops.dsd(x1, w2)
+
+
+class SimplifiedGroupedSparseGLU(SimplifiedSparseGLU):
+    def forward(self, x, tokens_per_expert):
+        # TODO: add the memory optimized implementation
+
+        batch_sizes = tokens_per_expert.cpu().to(torch.long)
+        w1, v1, w2 = (
+            resolve_dtensor(self.w1),
+            resolve_dtensor(self.v1),
+            resolve_dtensor(self.w2),
+        )
+
+        # Re-shape the weights for the grouped GEMMs.
+        ne = mpu.experts_per_rank(self.args)
+        w1 = w1.view(ne, -1, self.args.hidden_size)
+        v1 = v1.view(ne, -1, self.args.hidden_size)
+        w2 = w2.view(ne, -1, self.args.hidden_size)
+
+        if self.args.memory_optimized_mlp:
+            return memory_optimized_grouped_glu(
+                x,
+                w1,
+                v1,
+                w2,
+                batch_sizes,
+                self.args.quantize_inputs_num_bits,
+                self.args.quantize_rematerialize_num_bits,
+                self.args.activation_fn,
+            )
+
+        # Compute the MLP.
+        x1 = gg.ops.gmm(x, w1, batch_sizes, trans_b=True)
+        x2 = gg.ops.gmm(x, v1, batch_sizes, trans_b=True)
+        x1 = self.act_fn(x1) * x2
+        return gg.ops.gmm(x1, w2, batch_sizes)
+
+
+_REGISTRY["simplified_glu"] = {
+    "grouped": SimplifiedGroupedSparseGLU,
+    "sparse": SimplifiedSparseGLU,
+}
+
+
 class MixtralSparseMoeBlock(nn.Module):
     """
     This implementation is
@@ -963,32 +1069,42 @@ class MixtralSparseMoeBlock(nn.Module):
         self.ffn_dim = config.intermediate_size
         self.num_experts = config.num_local_experts
         self.top_k = config.num_experts_per_tok
-        self.score_scale_factor = config.score_scale_factor
 
         # specialized for llama-moe-v2
         self.act_rescale = config.act_rescale
-        self.enable_megablocks = config.enable_megablocks
+        self.scale_factor = config.scale_factor
+        self.moe_type = config.moe_type
 
         # gating
         self.gate = nn.Linear(self.hidden_dim, self.num_experts, bias=False)
 
-        if not self.enable_megablocks:
+        if self.moe_type == "modulelist":
             self.experts = nn.ModuleList(
                 [MixtralBLockSparseTop2MLP(config) for _ in range(self.num_experts)]
             )
-        else:
+        elif self.moe_type == "megablocks":
             args = MegablocksArguments(
                 hidden_size=self.hidden_dim,
                 ffn_hidden_size=self.ffn_dim,
                 moe_num_experts=self.num_experts,
                 moe_top_k=self.top_k,
                 activation_fn={"silu": F.silu}[config.hidden_act],
-                mlp_type="glu",
-                mlp_impl="grouped",
-                memory_optimized_mlp=True,
+                mlp_type="simplified_glu",
+                mlp_impl="sparse",
+                memory_optimized_mlp=False,
                 bias=False,
             )
             self.experts = ParallelDroplessMLP(args)
+        elif self.moe_type == "scattermoe":
+            self.experts = scattermoe.mlp.GLUMLP(
+                input_size=self.hidden_dim,
+                hidden_size=self.ffn_dim,
+                num_experts=self.num_experts,
+                top_k=self.top_k,
+                activation={"silu": F.silu}[config.hidden_act],
+            )
+        else:
+            raise NotImplementedError(f"Unsupported moe_type: {self.moe_type}")
 
     def forward(self, hidden_states: torch.Tensor) -> torch.Tensor:
         """ """
@@ -1003,9 +1119,13 @@ class MixtralSparseMoeBlock(nn.Module):
         # we cast back to the input dtype
         routing_weights = routing_weights.to(hidden_states.dtype)
 
-        if self.enable_megablocks:
+        if self.moe_type == "megablocks":
             final_hidden_states = self.experts(
                 hidden_states, scores, routing_weights, selected_experts
+            )
+        elif self.moe_type == "scattermoe":
+            final_hidden_states = self.experts(
+                hidden_states, routing_weights, selected_experts
             )
         else:
             final_hidden_states = torch.zeros(
@@ -1039,7 +1159,6 @@ class MixtralSparseMoeBlock(nn.Module):
                 current_hidden_states = (
                     expert_layer(current_state)
                     * routing_weights[top_x_list, idx_list, None]
-                    * self.score_scale_factor
                 )
 
                 # However `index_add_` only support torch tensors for indexing so we'll use
@@ -1053,7 +1172,7 @@ class MixtralSparseMoeBlock(nn.Module):
         )
 
         if self.act_rescale:
-            final_hidden_states *= self.num_experts / self.top_k
+            final_hidden_states = final_hidden_states * self.scale_factor
         return final_hidden_states, router_logits
 
 
