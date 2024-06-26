@@ -993,38 +993,43 @@ class SimplifiedSparseGLU(nn.Module):
                 "Memory optimized implementation not yet supported with GLU with sparse kernels."
             )
 
-        w1, v1, w2 = (
-            resolve_dtensor(self.w1),
-            resolve_dtensor(self.v1),
-            resolve_dtensor(self.w2),
-        )
+        # TODO (tzhu): test if OOM comes from dtensor conversion
+        # TODO (tzhu): return x directly to see if it still encounters OOM
+        # w1, v1, w2 = (
+        #     resolve_dtensor(self.w1),
+        #     resolve_dtensor(self.v1),
+        #     resolve_dtensor(self.w2),
+        # )
 
         # Compute the GLU.
-        x1 = stk.ops.sdd(x, w1.t(), topo)
-        x2 = stk.ops.sdd(x, v1.t(), topo)
+        x1 = stk.ops.sdd(x, self.w1.t(), topo)
+        x2 = stk.ops.sdd(x, self.v1.t(), topo)
 
         activation_fn_out = act_fn(x1, self.act_fn)
         x1 = stk.ops.mul(activation_fn_out, x2)
 
-        return stk.ops.dsd(x1, w2)
+        return stk.ops.dsd(x1, self.w2)
 
 
 class SimplifiedGroupedSparseGLU(SimplifiedSparseGLU):
     def forward(self, x, tokens_per_expert):
-        # TODO: add the memory optimized implementation
-
         batch_sizes = tokens_per_expert.cpu().to(torch.long)
-        w1, v1, w2 = (
-            resolve_dtensor(self.w1),
-            resolve_dtensor(self.v1),
-            resolve_dtensor(self.w2),
-        )
+        # w1, v1, w2 = (
+        #     resolve_dtensor(self.w1),
+        #     resolve_dtensor(self.v1),
+        #     resolve_dtensor(self.w2),
+        # )
 
         # Re-shape the weights for the grouped GEMMs.
-        ne = mpu.experts_per_rank(self.args)
-        w1 = w1.view(ne, -1, self.args.hidden_size)
-        v1 = v1.view(ne, -1, self.args.hidden_size)
-        w2 = w2.view(ne, -1, self.args.hidden_size)
+        # ne = mpu.experts_per_rank(self.args)
+        # w1 = self.w1.view(ne, -1, self.args.hidden_size)
+        # v1 = self.v1.view(ne, -1, self.args.hidden_size)
+        # w2 = self.w2.view(ne, -1, self.args.hidden_size)
+
+        ne = self.args.moe_num_experts
+        w1 = self.w1.view(ne, -1, self.args.hidden_size)
+        v1 = self.v1.view(ne, -1, self.args.hidden_size)
+        w2 = self.w2.view(ne, -1, self.args.hidden_size)
 
         if self.args.memory_optimized_mlp:
             return memory_optimized_grouped_glu(
@@ -1049,6 +1054,20 @@ _REGISTRY["simplified_glu"] = {
     "grouped": SimplifiedGroupedSparseGLU,
     "sparse": SimplifiedSparseGLU,
 }
+
+
+class SimplifiedParallelDroplessMLP(ParallelDroplessMLP):
+    def forward(self, x, expert_weights, top_experts):
+        in_shape = x.size()
+
+        # Compute the experts.
+        x, tokens_per_expert = self.forward_fn(x, expert_weights, top_experts)
+        x = x.view(in_shape)
+        if self.bias is not None:
+            if self.args.return_bias:
+                return x, self.bias
+            return x + self.bias
+        return x
 
 
 class MixtralSparseMoeBlock(nn.Module):
@@ -1090,11 +1109,11 @@ class MixtralSparseMoeBlock(nn.Module):
                 moe_top_k=self.top_k,
                 activation_fn={"silu": F.silu}[config.hidden_act],
                 mlp_type="simplified_glu",
-                mlp_impl="sparse",
-                memory_optimized_mlp=False,
+                mlp_impl="grouped",
+                memory_optimized_mlp=True,
                 bias=False,
             )
-            self.experts = ParallelDroplessMLP(args)
+            self.experts = SimplifiedParallelDroplessMLP(args)
         elif self.moe_type == "scattermoe":
             self.experts = scattermoe.mlp.GLUMLP(
                 input_size=self.hidden_dim,
@@ -1121,7 +1140,7 @@ class MixtralSparseMoeBlock(nn.Module):
 
         if self.moe_type == "megablocks":
             final_hidden_states = self.experts(
-                hidden_states, scores, routing_weights, selected_experts
+                hidden_states, routing_weights, selected_experts
             )
         elif self.moe_type == "scattermoe":
             final_hidden_states = self.experts(
