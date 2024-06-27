@@ -1102,6 +1102,8 @@ class MixtralSparseMoeBlock(nn.Module):
                 [MixtralBLockSparseTop2MLP(config) for _ in range(self.num_experts)]
             )
         elif self.moe_type == "megablocks":
+            is_fp16 = self.gate.weight.dtype == torch.float16
+            is_bf16 = self.gate.weight.dtype == torch.bfloat16
             args = MegablocksArguments(
                 hidden_size=self.hidden_dim,
                 ffn_hidden_size=self.ffn_dim,
@@ -1109,9 +1111,11 @@ class MixtralSparseMoeBlock(nn.Module):
                 moe_top_k=self.top_k,
                 activation_fn={"silu": F.silu}[config.hidden_act],
                 mlp_type="simplified_glu",
-                mlp_impl="grouped",
-                memory_optimized_mlp=True,
+                mlp_impl="sparse",
+                memory_optimized_mlp=False,
                 bias=False,
+                fp16=is_fp16,
+                bf16=is_bf16,
             )
             self.experts = SimplifiedParallelDroplessMLP(args)
         elif self.moe_type == "scattermoe":

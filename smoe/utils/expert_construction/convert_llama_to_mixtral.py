@@ -75,6 +75,7 @@ def convert_safetensors(
                 "modeling_mixtral.py",
             ]:
                 shutil.copy2(f"smoe/models/mixtral/{filename}", dump_folder / filename)
+            (dump_folder / "__init__.py").touch()
         elif filepath.name == "model.safetensors.index.json":
             raw_total_size = load_json(filepath)["metadata"]["total_size"]
         else:
@@ -195,14 +196,18 @@ def convert_safetensors(
 
 
 if __name__ == "__main__":
-    num_experts = 16
-    top_k = 4
+    num_experts = 56
+    top_k = 8
 
-    for moe_type in ["megablocks", "modulelist", "scattermoe"]:
+    src_model_dir = "/mnt/petrelfs/share_data/quxiaoye/models/Meta-Llama-3-8B-Instruct"
+    tgt_model_dir_prefix = "/mnt/petrelfs/zhutong/smoe/resources/llama-3-8b-mixtral"
+    tgt_moe_types = ["modulelist", "megablocks", "scattermoe"]
+
+    for moe_type in tgt_moe_types:
         print(f"converting {moe_type}")
         convert_safetensors(
-            "/mnt/petrelfs/share_data/quxiaoye/models/Meta-Llama-3-8B-Instruct",
-            f"/mnt/petrelfs/zhutong/smoe/resources/llama-3-8b-mixtral-{moe_type}-{num_experts}e-top{top_k}",
+            src_model_dir,
+            f"{tgt_model_dir_prefix}-{moe_type}-{num_experts}e-top{top_k}",
             num_experts=num_experts,
             top_k=top_k,
             moe_type=moe_type,
@@ -210,5 +215,5 @@ if __name__ == "__main__":
 
         print(f"testing {moe_type}")
         m = MixtralForCausalLM.from_pretrained(
-            f"/mnt/petrelfs/zhutong/smoe/resources/llama-3-8b-mixtral-{moe_type}-{num_experts}e-top{top_k}",
+            f"{tgt_model_dir_prefix}-{moe_type}-{num_experts}e-top{top_k}",
         )

@@ -25,11 +25,11 @@ export WANDB_PROJECT="v2-mixtral"
 
     # model_name_or_path="/mnt/petrelfs/zhutong/smoe/resources/llama-3-8b-mixtral-no-megablocks"
     # model_name_or_path="/mnt/petrelfs/zhutong/smoe/resources/llama-3-8b-mixtral-megablocks"
-    # model_name_or_path="/mnt/petrelfs/zhutong/smoe/resources/llama-3-8b-mixtral-megablocks-56e-top8"
+    model_name_or_path="/mnt/petrelfs/zhutong/smoe/resources/llama-3-8b-mixtral-megablocks-56e-top8"
     # model_name_or_path="/mnt/petrelfs/zhutong/smoe/resources/llama-3-8b-mixtral-no-megablocks-56e-top8"
     # model_name_or_path="/mnt/petrelfs/zhutong/smoe/resources/llama-3-8b-mixtral-scattermoe-56e-top8"
 
-    model_name_or_path="/mnt/petrelfs/zhutong/smoe/resources/llama-3-8b-mixtral-modulelist-16e-top4"
+    # model_name_or_path="/mnt/petrelfs/zhutong/smoe/resources/llama-3-8b-mixtral-modulelist-16e-top4"
     # model_name_or_path="/mnt/petrelfs/zhutong/smoe/resources/llama-3-8b-mixtral-megablocks-16e-top4"
     # model_name_or_path="/mnt/petrelfs/zhutong/smoe/resources/llama-3-8b-mixtral-scattermoe-16e-top4"
 
