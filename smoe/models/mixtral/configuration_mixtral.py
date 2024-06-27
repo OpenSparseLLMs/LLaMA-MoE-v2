@@ -165,7 +165,7 @@ class MixtralConfig(PretrainedConfig):
         output_router_logits=False,
         router_aux_loss_coef=0.001,
         act_rescale=True,
-        enable_megablocks=True,
+        moe_type: str = "modulelist",
         **kwargs,
     ):
         self.vocab_size = vocab_size
@@ -177,7 +177,7 @@ class MixtralConfig(PretrainedConfig):
         self.sliding_window = sliding_window
 
         self.act_rescale = act_rescale
-        self.enable_megablocks = enable_megablocks
+        self.moe_type = moe_type
 
         # for backward compatibility
         if num_key_value_heads is None:

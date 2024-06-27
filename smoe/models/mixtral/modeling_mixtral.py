@@ -604,6 +604,14 @@ class MixtralFlashAttention2(MixtralAttention):
     def __init__(self, *args, **kwargs):
         super().__init__(*args, **kwargs)
 
+        # TODO (tzhu): for q_proj attention MoE, use concatenation instead of sum for the expert outputs
+        # import copy
+        # config = copy.deepcopy(self.config)
+        # config.num_experts_per_tok = 8
+        # config.moe_type = "linearlist"
+        # config.num_heads = 8
+        # self.q_proj = MixtralSparseMoeBlock(config)
+
         # TODO: Should be removed once Flash Attention for RoCm is bumped to 2.1.
         # flash_attn<2.1 generates top-left aligned causal mask, while what is needed here is bottom-right alignement, that was made default for flash_attn>=2.1. This attribute is used to handle this difference. Reference: https://github.com/Dao-AILab/flash-attention/releases/tag/v2.1.0.
         # Beware that with flash_attn<2.1, using q_seqlen != k_seqlen (except for the case q_seqlen == 1) produces a wrong mask (top-left).
@@ -1100,6 +1108,18 @@ class MixtralSparseMoeBlock(nn.Module):
         if self.moe_type == "modulelist":
             self.experts = nn.ModuleList(
                 [MixtralBLockSparseTop2MLP(config) for _ in range(self.num_experts)]
+            )
+        elif self.moe_type == "linearlist":
+            # tzhu: for attention experts (attention MoE)
+            self.experts = nn.ModuleList(
+                [
+                    nn.Linear(
+                        self.hidden_dim // config.num_attention_heads,
+                        self.hidden_dim,
+                        bias=False,
+                    )
+                    for _ in range(config.num_attention_heads)
+                ]
             )
         elif self.moe_type == "megablocks":
             is_fp16 = self.gate.weight.dtype == torch.float16

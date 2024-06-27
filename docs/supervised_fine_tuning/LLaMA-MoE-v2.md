@@ -35,7 +35,7 @@ $ huggingface-cli download teknium/OpenHermes-2.5 --repo-type dataset --local-di
 $ srun -p MoE python resources/OpenHermes-2.5/json2jsonl.py
 ```
 
-## Model Preparation (Converting dense models to MoE)
+## 🧃 Model Preparation (Converting dense models to MoE)
 
 Check and change the `num_experts`, `top_k`, `src_model_dir`, `tgt_model_dir_prefix`, and `tgt_moe_types` according to your settings.
 
@@ -70,3 +70,6 @@ $ bash run.sh
 - **balance loss**: to enable the balance loss, change the `output_router_logits` in a model's `config.json` to `true` (e.g. `resources/llama-3-8b-mixtral-megablocks-56e-top8/config.json`)
 - **sequence length**: try to increase the `model_max_length` to `4096` as you can
 - **megablocks & scattermoe**: there may be bugs and the evaluation results are bad than `modulelist`, but the training process is available with 2.6x acceleration and the loss goes down correctly
+- **Attention MoE**
+- **More diversified & powerful data**
+- **DPO Alignment**
