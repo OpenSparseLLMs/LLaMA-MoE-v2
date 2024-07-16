@@ -13,7 +13,7 @@ from transformers.models.llama.modeling_llama import LlamaMLP
 
 from smoe.data.datasets_moe import ShardDataset
 from smoe.utils.expert_construction.k_means_constrained_cos import KMeansConstrainedCos
-from smoe.utils.kernel_function import pass_kernel_function
+from smoe.utils.operations.operation_tensor import pass_kernel_function
 from smoe.utils.visualization.visualize import visualize_expert_neuron_overlap
 
 

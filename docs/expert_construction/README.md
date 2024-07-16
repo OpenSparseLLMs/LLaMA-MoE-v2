@@ -262,9 +262,6 @@ bash ./scripts/expert_construction/convert/run_convert_gradient_residual.sh
 	-- scripts
         -- expert_construction
             -- convert
-            -- get_hidden_features (deprecated, will be removed later)
-            -- prune (deprecated, will be removed later)
-            -- select (deprecated, will be removed later)
             -- split
     -- smoe
         -- entrypoint
