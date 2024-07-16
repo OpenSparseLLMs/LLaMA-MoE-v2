@@ -75,12 +75,13 @@ print(tokenizer.decode(pred.cpu()[0], skip_special_tokens=True))
 3. Take the variables into effect: `source ~/.bashrc`
 4. Install PyTorch (CUDA-11.8): `pip3 install torch torchvision torchaudio --index-url https://download.pytorch.org/whl/cu118`
 5. Install dependencies: `pip install -r requirements.txt`
-6. Install `flash-attn`: `pip install flash-attn==2.0.1 --no-build-isolation`. You may need to follow the [flash-attn installation instructions](https://github.com/Dao-AILab/flash-attention?tab=readme-ov-file#installation-and-features) to avoid some errors.
-7. Install the latest Git: `conda install git`
-8. Clone the repo: `git clone git@github.com:pjlab-sys4nlp/llama-moe.git` (If you don't setup the ssh key to GitHub, you may not able to clone through ssh. Check the [docs](https://docs.github.com/en/authentication/connecting-to-github-with-ssh/adding-a-new-ssh-key-to-your-github-account) about it.)
-9. Change current directory: `cd llama-moe`
-10. Install `smoe` in [editable mode](https://pip.pypa.io/en/stable/cli/pip_install/#cmdoption-e): `pip install -e .[dev]`
-11. Setup `pre-commit` hooks: `pre-commit install`
+6. Install `flash-attn`: `pip install flash-attn --no-build-isolation`. You may need to follow the [flash-attn installation instructions](https://github.com/Dao-AILab/flash-attention?tab=readme-ov-file#installation-and-features) to avoid some errors. 
+7. Install `scattermoe`: `git clone https://github.com/shawntan/scattermoe.git` and follow the instruction on the [official website](https://github.com/shawntan/scattermoe).
+8. Install the latest Git: `conda install git`
+9. Clone the repo: `git clone git@github.com:pjlab-sys4nlp/llama-moe.git` (If you don't setup the ssh key to GitHub, you may not able to clone through ssh. Check the [docs](https://docs.github.com/en/authentication/connecting-to-github-with-ssh/adding-a-new-ssh-key-to-your-github-account) about it.)
+10. Change current directory: `cd llama-moe`
+11. Install `smoe` in [editable mode](https://pip.pypa.io/en/stable/cli/pip_install/#cmdoption-e): `pip install -e .[dev]`
+12. Setup `pre-commit` hooks: `pre-commit install`
 
 <h2 id="performance">📊 Model Performance</h2>
 
