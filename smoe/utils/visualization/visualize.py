@@ -12,7 +12,7 @@ from tqdm import tqdm
 
 from smoe.data.datasets_moe import ShardDataset
 from smoe.utils.io import compress_png_image
-from smoe.utils.kernel_function import pass_kernel_function
+from smoe.utils.operations.operation_tensor import pass_kernel_function
 from smoe.utils.visualization.plotter import plotter
 
 

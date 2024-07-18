@@ -91,7 +91,7 @@ proj_type="" # outputs to use for constructing co-activation graph, should be se
 Before performing gradient-based splitting (Eq. 8 in the technical report), you need to prepare a bunch of pretraining data and group them into different clusters by running:
 
 ```shell
-python smoe/entrypoint/text_clustering.py
+python smoe/entrypoint/expert_construction/text_clustering.py
 ```
 
 Then, you need to run the following script to get the importance vector $v$ for the intermediate neurons in each layer:
@@ -262,9 +262,6 @@ bash ./scripts/expert_construction/convert/run_convert_gradient_residual.sh
 	-- scripts
         -- expert_construction
             -- convert
-            -- get_hidden_features (deprecated, will be removed later)
-            -- prune (deprecated, will be removed later)
-            -- select (deprecated, will be removed later)
             -- split
     -- smoe
         -- entrypoint

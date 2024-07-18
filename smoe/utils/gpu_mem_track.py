@@ -132,9 +132,7 @@ class MemTracker(object):
                         type(x),
                         tuple(x.size()),
                         ts_list.count((x.size(), x.dtype)),
-                        np.prod(np.array(x.size()))
-                        * get_mem_space(x.dtype)
-                        / 1024**2,
+                        np.prod(np.array(x.size())) * get_mem_space(x.dtype) / 1024**2,
                         x.dtype,
                     )
                     for x in self.get_tensors()
