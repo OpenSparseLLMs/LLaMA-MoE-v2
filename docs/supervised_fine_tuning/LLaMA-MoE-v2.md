@@ -5,19 +5,33 @@ dependencies:
 cuda: 11.8
 python: 3.11.4
 
-For `megablocks` and `stanford-stk`, the installation has to be done in the computing cluster: `srun -p MoE pip install xxx`
+Just follow the installation guide in [README.md](..%2F..%2FREADME.md), which can be simplified as:
+
+```bash
+conda create -n smoe python=3.11
+pip install torch torchvision torchaudio --index-url https://download.pytorch.org/whl/cu118
+pip install -r requirements.txt
+pip install flash-attn --no-build-isolation
+git clone git@github.com:pjlab-sys4nlp/llama-moe.git
+cd llama-moe
+pip install -e .[dev]
+```
+
+For special packages that are exclusive in v2, please follow:
+
+1. Install `megablocks` and `stanford-stk`, the installation has to be done in the computing cluster: `srun -p MoE pip install megablocks==0.5.1`.
+2. Install `scattermoe`: `git clone https://github.com/shawntan/scattermoe.git` and follow the instruction on the [official website](https://github.com/shawntan/scattermoe).
+
+Finally, ensure that you environments satisfy:
 
 ```
-triton==2.1.0
-torch==2.0.1
-flash-attn==2.4.2
+deepspeed==0.14.4
+flash-attn==2.6.1
 megablocks==0.5.1
-stanford-stk==0.7.0
-transformers==4.31.0
-deepspeed==0.10.0
-huggingface-hub==0.23.4
-# scattermoe: 0526612bd53f3
-git+https://github.com/shawntan/scattermoe.git@0526612bd53f3
+scattermoe==0.0.0 (installed locally)
+torch==2.3.1
+triton==2.3.1
+transformers==4.42.4
 ```
 
 For disabling `wandb` during training, you may run the following command:
@@ -70,6 +84,7 @@ $ bash run.sh
 - **balance loss**: to enable the balance loss, change the `output_router_logits` in a model's `config.json` to `true` (e.g. `resources/llama-3-8b-mixtral-megablocks-56e-top8/config.json`)
 - **sequence length**: try to increase the `model_max_length` to `4096` as you can
 - **megablocks & scattermoe**: there may be bugs and the evaluation results are bad than `modulelist`, but the training process is available with 2.6x acceleration and the loss goes down correctly
+- **DPO Alignment**: Done
+- **More Split Strategies**
 - **Attention MoE**
 - **More diversified & powerful data**
-- **DPO Alignment**

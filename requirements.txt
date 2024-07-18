@@ -6,7 +6,6 @@ huggingface-hub==0.23.4
 k-means-constrained==0.7.3
 loguru==0.7.2
 matplotlib==3.9.1
-megablocks==0.5.1
 ninja==1.11.1.1
 nltk==3.8.1
 numpy==1.26.3
