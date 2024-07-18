@@ -624,7 +624,9 @@ def forward_topk_balanced_noisy_gate_with_selected_pair_recording(self, x):
     logits_gate = self.gate_network(x)  # gate计算出的权重
     if self.training and self.add_noise:
         noise_mm = self.weight_noise(x)  # 噪声矩阵计算结果
-        noise_control = self.softplus(noise_mm) + self.noise_epsilon  # 控制器得到的噪声增加量
+        noise_control = (
+            self.softplus(noise_mm) + self.noise_epsilon
+        )  # 控制器得到的噪声增加量
         logits_noise = torch.randn_like(logits_gate) * noise_control  # noise附加的权重
         logits = logits_gate + logits_noise  # 最终权重
     else:

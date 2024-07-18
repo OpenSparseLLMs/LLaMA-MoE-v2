@@ -25,6 +25,7 @@ import warnings
 from dataclasses import dataclass
 from typing import List, Optional, Tuple, Union
 
+import scattermoe
 import stk
 import torch
 import torch.nn.functional as F
@@ -52,7 +53,6 @@ from transformers.utils import (
 )
 from transformers.utils.import_utils import is_torch_fx_available
 
-import scattermoe
 from smoe.utils.cache_utils import Cache, DynamicCache
 from smoe.utils.modeling_attn_mask_utils import _prepare_4d_causal_attention_mask
 

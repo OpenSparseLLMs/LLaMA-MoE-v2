@@ -26,7 +26,7 @@ def chunk_dataframe(df, num_chunks):
     start = 0
     for _ in range(num_chunks):
         chunk_size = avg_chunk_size + 1 if remainder > 0 else avg_chunk_size
-        chunks.append(df.iloc[start:start + chunk_size])
+        chunks.append(df.iloc[start : start + chunk_size])
         start += chunk_size
         remainder -= 1
 
@@ -56,6 +56,6 @@ def chunk_dataframe_with_yield(df, num_chunks):
     start = 0
     for _ in range(num_chunks):
         chunk_size = avg_chunk_size + 1 if remainder > 0 else avg_chunk_size
-        yield df.iloc[start:start + chunk_size]
+        yield df.iloc[start : start + chunk_size]
         start += chunk_size
         remainder -= 1

@@ -289,7 +289,12 @@ def main():
         if isinstance(config, MixtralConfig):
             config._attn_implementation = "flash_attention_2"
 
-        model: LlamaForCausalLM | LlamaMoEForCausalLM | LlamaMoEResidualForCausalLM | MixtralForCausalLM = ModelClass.from_pretrained(
+        model: (
+            LlamaForCausalLM
+            | LlamaMoEForCausalLM
+            | LlamaMoEResidualForCausalLM
+            | MixtralForCausalLM
+        ) = ModelClass.from_pretrained(
             model_args.model_name_or_path,
             from_tf=bool(".ckpt" in model_args.model_name_or_path),
             config=config,

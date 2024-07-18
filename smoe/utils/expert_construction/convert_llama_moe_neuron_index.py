@@ -1,4 +1,5 @@
 """Convert a vanilla llama to llama-moe"""
+
 import os
 import shutil
 
@@ -16,13 +17,13 @@ from smoe.utils.io import torch_load_template_file
 
 
 def convert_llama_model_neuron_index(
-        llama_model_path,
-        split_index_path,
-        save_path,
-        template,
-        num_experts,
-        num_selects,
-        score_scale_factor=None,
+    llama_model_path,
+    split_index_path,
+    save_path,
+    template,
+    num_experts,
+    num_selects,
+    score_scale_factor=None,
 ):
     """
     LlamaMoEModel
@@ -112,13 +113,13 @@ def convert_llama_model_neuron_index(
 
 
 def convert_llama_model_for_causal_lm_neuron_index(
-        llama_model_path,
-        split_index_path,
-        save_path,
-        template,
-        num_experts,
-        num_selects,
-        score_scale_factor=None,
+    llama_model_path,
+    split_index_path,
+    save_path,
+    template,
+    num_experts,
+    num_selects,
+    score_scale_factor=None,
 ):
     """
     LlamaMoEForCausalLM
@@ -208,13 +209,13 @@ def convert_llama_model_for_causal_lm_neuron_index(
 
 
 def convert_llama_model_for_sequence_classification_neuron_index(
-        llama_model_path,
-        split_index_path,
-        save_path,
-        template,
-        num_experts,
-        num_selects,
-        score_scale_factor=None,
+    llama_model_path,
+    split_index_path,
+    save_path,
+    template,
+    num_experts,
+    num_selects,
+    score_scale_factor=None,
 ):
     """
     LlamaMoEForSequenceClassification

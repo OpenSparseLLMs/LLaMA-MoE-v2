@@ -10,7 +10,9 @@ class Conversation:
         # The template of the system prompt
         self.system_template: str = "{system_message}"
         # The system message
-        self.system_message: str = "A chat between a curious user and an artificial intelligence assistant. The assistant gives helpful, detailed, and polite answers to the user's questions."
+        self.system_message: str = (
+            "A chat between a curious user and an artificial intelligence assistant. The assistant gives helpful, detailed, and polite answers to the user's questions."
+        )
         # The names of two roles
         self.roles: Tuple[str] = ("USER", "ASSISTANT")
         # All messages. Each item is (role, message).

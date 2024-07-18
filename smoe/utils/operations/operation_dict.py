@@ -9,5 +9,7 @@ def reverse_dict(input_dict, aggregate_same_results=True):
                     output_dict[value] = [output_dict[value]]
                 output_dict[value].append(key)
             else:
-                raise ValueError("Input dictionary does not satisfy the one-to-one mapping condition.")
+                raise ValueError(
+                    "Input dictionary does not satisfy the one-to-one mapping condition."
+                )
     return output_dict

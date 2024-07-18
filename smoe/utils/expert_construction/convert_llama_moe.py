@@ -1,4 +1,5 @@
 """Convert a vanilla llama to llama-moe"""
+
 import os
 import shutil
 from collections import Counter
@@ -17,16 +18,16 @@ from smoe.utils.io import torch_load_template_file
 
 
 def convert_llama_model(
-        llama_model_path,
-        split_index_path,
-        save_path,
-        template,
-        num_experts,
-        num_selects,
-        score_scale_factor=None,
-        gate_type="mlp",  # "linear"
-        use_softmax=True,
-        multiply_gate_scores=True,
+    llama_model_path,
+    split_index_path,
+    save_path,
+    template,
+    num_experts,
+    num_selects,
+    score_scale_factor=None,
+    gate_type="mlp",  # "linear"
+    use_softmax=True,
+    multiply_gate_scores=True,
 ):
     """
     LlamaMoEModel
@@ -109,16 +110,16 @@ def convert_llama_model(
 
 
 def convert_llama_model_for_causal_lm(
-        llama_model_path,
-        split_index_path,
-        save_path,
-        template,
-        num_experts,
-        num_selects,
-        score_scale_factor=None,
-        gate_type="mlp",  # "linear"
-        use_softmax=True,
-        multiply_gate_scores=True,
+    llama_model_path,
+    split_index_path,
+    save_path,
+    template,
+    num_experts,
+    num_selects,
+    score_scale_factor=None,
+    gate_type="mlp",  # "linear"
+    use_softmax=True,
+    multiply_gate_scores=True,
 ):
     """
     LlamaMoEForCausalLM
@@ -201,16 +202,16 @@ def convert_llama_model_for_causal_lm(
 
 
 def convert_llama_model_for_sequence_classification(
-        llama_model_path,
-        split_index_path,
-        save_path,
-        template,
-        num_experts,
-        num_selects,
-        score_scale_factor=None,
-        gate_type="mlp",  # "linear"
-        use_softmax=True,
-        multiply_gate_scores=True,
+    llama_model_path,
+    split_index_path,
+    save_path,
+    template,
+    num_experts,
+    num_selects,
+    score_scale_factor=None,
+    gate_type="mlp",  # "linear"
+    use_softmax=True,
+    multiply_gate_scores=True,
 ):
     """
     LlamaMoEForSequenceClassification

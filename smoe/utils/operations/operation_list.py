@@ -1,4 +1,4 @@
-from typing import Union, List
+from typing import List, Union
 
 import numpy as np
 
@@ -27,7 +27,7 @@ def chunk_list(input_list, num_chunks):
     start = 0
     for _ in range(num_chunks):
         chunk_size = avg_chunk_size + 1 if remainder > 0 else avg_chunk_size
-        chunks.append(input_list[start:start + chunk_size])
+        chunks.append(input_list[start : start + chunk_size])
         start += chunk_size
         remainder -= 1
 
@@ -57,7 +57,7 @@ def chunk_list_with_yield(input_list, num_chunks):
     start = 0
     for _ in range(num_chunks):
         chunk_size = avg_chunk_size + 1 if remainder > 0 else avg_chunk_size
-        yield input_list[start:start + chunk_size]
+        yield input_list[start : start + chunk_size]
         start += chunk_size
         remainder -= 1
 
@@ -86,10 +86,12 @@ def split_list(input_list, split_length, drop_last=False):
     num_elements = len(input_list)
     num_splits = num_elements // split_length
 
-    sublists = [input_list[i * split_length: (i + 1) * split_length] for i in range(num_splits)]
+    sublists = [
+        input_list[i * split_length : (i + 1) * split_length] for i in range(num_splits)
+    ]
 
     if not drop_last and num_splits * split_length < num_elements:
-        sublists.append(input_list[num_splits * split_length:])
+        sublists.append(input_list[num_splits * split_length :])
 
     return sublists
 
@@ -121,7 +123,7 @@ def split_list_with_yield(input_list, split_length, drop_last=False):
 
     start = 0
     for _ in range(num_splits):
-        sublist = input_list[start: start + split_length]
+        sublist = input_list[start : start + split_length]
         yield sublist
         start += split_length
 
@@ -158,29 +160,40 @@ def replicate_elements(input_list, num_copies: Union[int, float, List[int]]):
         num_copies_list = [int_part] * len(input_list)
 
         if isinstance(num_copies, float):
-            frac_part = num_copies - int_part  # Fractional part for the proportional extra copies
+            frac_part = (
+                num_copies - int_part
+            )  # Fractional part for the proportional extra copies
             extra_copies_count = round(frac_part * len(input_list))
 
             if extra_copies_count > 0:
                 # Choose the items to be replicated
-                extra_num_copies_array = np.concatenate((
-                    np.ones(extra_copies_count, dtype=int),
-                    np.zeros(len(input_list) - extra_copies_count, dtype=int)
-                ), axis=0)
+                extra_num_copies_array = np.concatenate(
+                    (
+                        np.ones(extra_copies_count, dtype=int),
+                        np.zeros(len(input_list) - extra_copies_count, dtype=int),
+                    ),
+                    axis=0,
+                )
                 np.random.shuffle(extra_num_copies_array)
 
                 # Add to the "num_copies_list"
-                num_copies_list = (np.array(num_copies_list) + extra_num_copies_array).tolist()
+                num_copies_list = (
+                    np.array(num_copies_list) + extra_num_copies_array
+                ).tolist()
 
     elif isinstance(num_copies, list):
         # Variable replication based on the list
         if len(input_list) != len(num_copies):
-            raise ValueError("Lengths of input_list and num_copies_list must be the same.")
+            raise ValueError(
+                "Lengths of input_list and num_copies_list must be the same."
+            )
 
         num_copies_list = num_copies
 
     else:
-        raise ValueError("Invalid type for num_copies. It should be an int, float, or a list.")
+        raise ValueError(
+            "Invalid type for num_copies. It should be an int, float, or a list."
+        )
 
     new_list = []
     for item, num_copies_item in zip(input_list, num_copies_list):

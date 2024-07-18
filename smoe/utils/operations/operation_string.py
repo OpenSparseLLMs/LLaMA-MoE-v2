@@ -1,6 +1,5 @@
-import types
-
 import re
+import types
 from argparse import ArgumentTypeError
 
 
@@ -36,7 +35,7 @@ def extract_numbers(string):
     """Extract numbers (int, float) from a given string."""
     pattern = r"[-+]?\d*\.\d+|\d+"
     matches = re.findall(pattern, string)
-    numbers = [float(match) if '.' in match else int(match) for match in matches]
+    numbers = [float(match) if "." in match else int(match) for match in matches]
     return numbers
 
 
@@ -52,7 +51,7 @@ def calculate_non_ascii_ratio(string):
 
 def remove_non_ascii_code(string):
     """Use a regular expression to remove all non-ASCII characters"""
-    string = re.sub(r'[^\x00-\x7F]+', '', string)
+    string = re.sub(r"[^\x00-\x7F]+", "", string)
     return string
 
 
@@ -63,9 +62,9 @@ def replace_non_ascii_code(string):
     :param string: Input string with non-ASCII characters.
     :return: String with non-ASCII characters replaced.
     """
-    string = re.sub(r'“|”', "\"", string)
-    string = re.sub(r'‘|’', "\'", string)
-    string = re.sub(r'—|–', "-", string)
-    string = re.sub(r'…', "...", string)
+    string = re.sub(r"“|”", '"', string)
+    string = re.sub(r"‘|’", "'", string)
+    string = re.sub(r"—|–", "-", string)
+    string = re.sub(r"…", "...", string)
 
     return string
