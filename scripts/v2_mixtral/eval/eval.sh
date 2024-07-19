@@ -16,6 +16,7 @@ mmlu() {
         --device cuda:0 \
         --batch_size auto \
         --verbosity DEBUG \
+        --trust_remote_code \
         --output_path $RESULT_DIR/mmlu
 }
 
@@ -88,6 +89,7 @@ extend() {
         --device cuda:0 \
         --batch_size auto \
         --verbosity DEBUG \
+        --trust_remote_code \
         --output_path $RESULT_DIR/extend
 }
 
