@@ -67,6 +67,19 @@ Check the settings in `scripts/v2_mixtral/mb_64e_top8.sh` and run `sbatch script
 - `model_type` must be `auto` for enabling `trust_remote_code=True`.
 - `##SBATCH` means the slurm setting is not activated.
 
+## DPO
+
+先跑`python smoe/entrypoint/dpo/merge_datasets.py`，合并数据集。注意数据集应该有相同的columns名称，不然合并时会报错。(这里应该也有更好的方法，但时间有限，我就先这样简单写了，你们后面正式搞的时候，应该要对每种数据都做下分别处理)
+
+跑训练的话，就直接`bash scripts/v2_mixtral/dpo/mb_64e_top8_dpo.sh`。可以调以下参数：
+
+```
+output_router_logits: 控制是否将balance loss进行backward。现在只能为False，即不加balance loss。为True会报错，应该要同步改Trainer，这个需要你们来实现。
+freeze_gate: 要不要冻结gate参数。现在为True，来弥补不加balance loss对平衡产生的影响。
+beta: DPO的一个超参，一般在0.1到0.5之间，我没调这个，用的默认的0.1，不过也可以调下。
+learning_rate: 一般要小于等于微调阶段的最终学习率，目前搜出来8e-6比较好，如果后面微调阶段学习率有修改，可以以这个值为中心再搜索一波DPO学习率。
+```
+
 ## 🛫 Evaluation
 
 ```bash
