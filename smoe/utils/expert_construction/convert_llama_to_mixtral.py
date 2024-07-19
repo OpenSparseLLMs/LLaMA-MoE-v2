@@ -40,12 +40,11 @@ FFN_TYPE_MAP = {
 
 
 def convert_safetensors(
-        model_dir,
-        dump_dir,
-        num_experts: int,
-        top_k: int,
-        moe_type: str,
-        neuron_indices: dict = None,
+    model_dir,
+    dump_dir,
+    num_experts: int,
+    top_k: int,
+    moe_type: str,
 ):
     model_folder = Path(model_dir)
     dump_folder = Path(dump_dir)
@@ -96,81 +95,51 @@ def convert_safetensors(
             for key in f.keys():
                 tensor = f.get_tensor(key)
                 if ".mlp." in key:
-                    # preparation
                     layer_idx, ffn_type = re.search(
                         r"model.layers.(\d+).mlp.(gate|up|down)_proj.weight", key
                     ).groups()
                     contained_layers.add(layer_idx)
-
                     if ffn_type == "down":
                         hsz, mid = tensor.shape
                         mid_idx = 1
                     else:
                         mid, hsz = tensor.shape
                         mid_idx = 0
-
                     if layer_idx not in router_records:
                         tensors[
                             f"model.layers.{layer_idx}.block_sparse_moe.gate.weight"
                         ] = torch.zeros(num_experts, hsz)
                         router_records.add(layer_idx)
                     new_ffn_type = ffn_type_map[ffn_type]
-
-                    # start splitting
                     if moe_type == "megablocks":
-                        states_dict_name = f"model.layers.{layer_idx}.block_sparse_moe.experts.mlp.{new_ffn_type}"
                         if mid_idx == 1:
                             tensor = tensor.view(mid, hsz)
-                        if neuron_indices is None:  # sequential split
-                            tensors[states_dict_name] = tensor
-                        else:  # split according to the given indices
-                            this_layer_indices: list = neuron_indices[layer_idx]
-                            expert_size = mid // num_experts
-                            tensors[states_dict_name] = torch.zeros_like(tensor)
-                            for expert_idx in range(num_experts):
-                                tensors[states_dict_name][expert_idx * expert_size: (expert_idx + 1) * expert_size] = tensor[this_layer_indices].clone()
-
+                        tensors[
+                            f"model.layers.{layer_idx}.block_sparse_moe.experts.mlp.{new_ffn_type}"
+                        ] = tensor
                     elif moe_type == "modulelist":
                         expert_size = mid // num_experts
                         for expert_idx in range(num_experts):
                             if mid_idx == 0:
-                                if neuron_indices is None:  # sequential split
-                                    expert_tensor = tensor[
-                                                    expert_idx
-                                                    * expert_size: (expert_idx + 1)  # noqa: W503,E203
-                                                                   * expert_size  # noqa: W503
-                                                    ].clone()
-                                else:  # split according to the given indices
-                                    this_layer_indices: list = neuron_indices[layer_idx]
-                                    expert_tensor = tensor[this_layer_indices].clone()
+                                expert_tensor = tensor[
+                                    expert_idx
+                                    * expert_size : (expert_idx + 1)  # noqa: W503,E203
+                                    * expert_size  # noqa: W503
+                                ].clone()
                             else:
-                                if neuron_indices is None:  # sequential split
-                                    expert_tensor = tensor[
-                                                    :,
-                                                    expert_idx
-                                                    * expert_size: (expert_idx + 1)  # noqa: W503,E203
-                                                                   * expert_size,  # noqa: W503
-                                                    ].clone()
-                                else:  # split according to the given indices
-                                    this_layer_indices: list = neuron_indices[layer_idx]
-                                    expert_tensor = tensor[:, this_layer_indices].clone()
+                                expert_tensor = tensor[
+                                    :,
+                                    expert_idx
+                                    * expert_size : (expert_idx + 1)  # noqa: W503,E203
+                                    * expert_size,  # noqa: W503
+                                ].clone()
                             tensors[
                                 f"model.layers.{layer_idx}.block_sparse_moe.experts.{expert_idx}.{new_ffn_type}.weight"
                             ] = expert_tensor
-
                     elif moe_type == "scattermoe":
                         if mid_idx == 1:
                             tensor = tensor.view(mid, hsz)
-
-                        expert_size = mid // num_experts
-                        if neuron_indices is None:  # sequential split
-                            tensor = tensor.view(num_experts, expert_size, hsz)
-                        else:  # split according to the given indices
-                            this_layer_indices: list = neuron_indices[layer_idx]
-                            temp_tensor = torch.zeros((num_experts, expert_size, hsz), device=tensor.device, dtype=tensor.dtype)
-                            for expert_idx in range(num_experts):
-                                temp_tensor[expert_idx] = tensor[this_layer_indices].clone()
-                            tensor = temp_tensor
+                        tensor = tensor.view(num_experts, mid // num_experts, hsz)
 
                         if new_ffn_type == "output_experts":
                             tensors[
@@ -191,7 +160,7 @@ def convert_safetensors(
                 # for the last file, take all the rest of the layers
                 if fi == len(tensor_filepaths) - 1:
                     contained_layers = (
-                            set(scattermoe_upgate_tensors.keys()) - visited_layers
+                        set(scattermoe_upgate_tensors.keys()) - visited_layers
                     )
 
                 for layer_idx in contained_layers:

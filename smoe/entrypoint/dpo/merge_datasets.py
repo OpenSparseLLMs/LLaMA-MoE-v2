@@ -1,4 +1,4 @@
-from datasets import DatasetDict, concatenate_datasets, load_dataset
+from datasets import load_dataset, DatasetDict, concatenate_datasets
 
 ALL_DATASETS = {
     "argilla/ultrafeedback-binarized-preferences-cleaned": {
@@ -11,11 +11,13 @@ ALL_DATASETS = {
     #     "chosen": "chosen",
     #     "rejected": "rejected",
     # },  # 155k, an augmented version of the above dataset
+
     "argilla/distilabel-capybara-dpo-7k-binarized": {
         "prompt": "prompt",
         "chosen": "chosen",
         "rejected": "rejected",
     },  # 7.56k
+
     # "argilla/distilabel-intel-orca-dpo-pairs": {
     #     "input": "prompt",
     #     "chosen": "chosen",
@@ -45,7 +47,9 @@ if __name__ == "__main__":
         all_keys.update(ds.keys())
 
     cat_ds = DatasetDict(
-        {"train": concatenate_datasets([ds["train"] for ds in all_ds])}
+        {
+            "train": concatenate_datasets([ds["train"] for ds in all_ds])
+        }
     )
     print("cat_dataset", cat_ds.num_rows, cat_ds.column_names)
 

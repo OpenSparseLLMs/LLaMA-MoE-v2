@@ -39,13 +39,9 @@ from typing import Optional
 import torch
 from datasets import load_dataset
 from trl import DPOConfig, DPOTrainer, RichProgressCallback
-from trl.commands.cli_utils import DPOScriptArguments, TrlParser, init_zero_verbose
+from trl.commands.cli_utils import DPOScriptArguments, init_zero_verbose, TrlParser
 
-from smoe.entrypoint.sft.train_sft_llama3 import (
-    ModelArguments,
-    get_model_and_tokenizer,
-    trainer_save_model_safe,
-)
+from smoe.entrypoint.sft.train_sft_llama3 import ModelArguments, get_model_and_tokenizer, trainer_save_model_safe
 from smoe.utils.operations.operation_string import str2bool
 
 TRL_USE_RICH = str2bool(os.getenv("TRL_USE_RICH", "0"))
@@ -57,9 +53,7 @@ if TRL_USE_RICH:
     from rich.console import Console
     from rich.logging import RichHandler
 
-    logging.basicConfig(
-        format=FORMAT, datefmt="[%X]", handlers=[RichHandler()], level=logging.INFO
-    )
+    logging.basicConfig(format=FORMAT, datefmt="[%X]", handlers=[RichHandler()], level=logging.INFO)
 
 
 @dataclass
@@ -67,9 +61,7 @@ class DPOMoEArguments(DPOConfig):
     cache_dir: Optional[str] = field(default=None)
     model_max_length: int = field(
         default=2048,
-        metadata={
-            "help": "Maximum sequence length. Sequences will be right padded (and possibly truncated)."
-        },
+        metadata={"help": "Maximum sequence length. Sequences will be right padded (and possibly truncated)."},
     )
     freeze_gate: bool = field(
         default=False,
@@ -122,9 +114,7 @@ if __name__ == "__main__":
             if ".gate." in name:
                 param.requires_grad = False
     if args.ignore_bias_buffers:  # torch distributed hack
-        model._ddp_params_and_buffers_to_ignore = [
-            name for name, buffer in model.named_buffers() if buffer.dtype == torch.bool
-        ]
+        model._ddp_params_and_buffers_to_ignore = [name for name, buffer in model.named_buffers() if buffer.dtype == torch.bool]
 
     # Set config
     if training_args.output_router_logits is not None:
@@ -137,18 +127,8 @@ if __name__ == "__main__":
 
     ###############################################################
     # Optional rich context managers
-    init_context = (
-        nullcontext()
-        if not TRL_USE_RICH
-        else console.status("[bold green]Initializing the DPOTrainer...")
-    )
-    save_context = (
-        nullcontext()
-        if not TRL_USE_RICH
-        else console.status(
-            f"[bold green]Training completed! Saving the model to {training_args.output_dir}"
-        )
-    )
+    init_context = nullcontext() if not TRL_USE_RICH else console.status("[bold green]Initializing the DPOTrainer...")
+    save_context = nullcontext() if not TRL_USE_RICH else console.status(f"[bold green]Training completed! Saving the model to {training_args.output_dir}")
 
     ###############################################################
     # Dataset
@@ -157,17 +137,13 @@ if __name__ == "__main__":
         for key in ds:
             ds[key] = ds[key].select(range(50))
 
+
     def process(row):
-        row["prompt"] = tokenizer.apply_chat_template(
-            row["chosen"][:-1], tokenize=False
-        )
-        row["chosen"] = tokenizer.apply_chat_template(
-            [row["chosen"][-1]], tokenize=False
-        )
-        row["rejected"] = tokenizer.apply_chat_template(
-            [row["rejected"][-1]], tokenize=False
-        )
+        row["prompt"] = tokenizer.apply_chat_template(row["chosen"][:-1], tokenize=False)
+        row["chosen"] = tokenizer.apply_chat_template([row["chosen"][-1]], tokenize=False)
+        row["rejected"] = tokenizer.apply_chat_template([row["rejected"][-1]], tokenize=False)
         return row
+
 
     ds = ds.map(
         process,
