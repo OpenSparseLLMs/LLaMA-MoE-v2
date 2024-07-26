@@ -45,7 +45,10 @@ def convert_safetensors(
     num_experts: int,
     top_k: int,
     moe_type: str,
+    neuron_indices: dict = None,
+    gate_weights: dict = None,
 ):
+    # fmt: off
     model_folder = Path(model_dir)
     dump_folder = Path(dump_dir)
     dump_folder.mkdir(parents=True, exist_ok=True)
@@ -95,51 +98,85 @@ def convert_safetensors(
             for key in f.keys():
                 tensor = f.get_tensor(key)
                 if ".mlp." in key:
+                    # preparation
                     layer_idx, ffn_type = re.search(
                         r"model.layers.(\d+).mlp.(gate|up|down)_proj.weight", key
                     ).groups()
+                    layer_idx = int(layer_idx)
+
                     contained_layers.add(layer_idx)
+
                     if ffn_type == "down":
                         hsz, mid = tensor.shape
                         mid_idx = 1
                     else:
                         mid, hsz = tensor.shape
                         mid_idx = 0
+
+                    # initialize gate weights
                     if layer_idx not in router_records:
-                        tensors[
-                            f"model.layers.{layer_idx}.block_sparse_moe.gate.weight"
-                        ] = torch.zeros(num_experts, hsz)
+                        if gate_weights is None:  # use newly initialized gate weights
+                            tensors[
+                                f"model.layers.{layer_idx}.block_sparse_moe.gate.weight"
+                            ] = torch.zeros(num_experts, hsz)  # TODO by DDZ: all zeros may be problematic here. I suggest using random initialization, where the initialization std should be adjusted according to the std of hidden features. You can try this out if possible.
+                        else:  # use provided gate weights
+                            print(f"Initializing layer {layer_idx} gate weights using {gate_weights[layer_idx]}...")
+                            tensors[
+                                f"model.layers.{layer_idx}.block_sparse_moe.gate.weight"
+                            ] = gate_weights[layer_idx]
                         router_records.add(layer_idx)
                     new_ffn_type = ffn_type_map[ffn_type]
+
+                    # initialize expert weights
                     if moe_type == "megablocks":
+                        states_dict_name = f"model.layers.{layer_idx}.block_sparse_moe.experts.mlp.{new_ffn_type}"
                         if mid_idx == 1:
                             tensor = tensor.view(mid, hsz)
-                        tensors[
-                            f"model.layers.{layer_idx}.block_sparse_moe.experts.mlp.{new_ffn_type}"
-                        ] = tensor
+                        if neuron_indices is None:  # sequential split
+                            tensors[states_dict_name] = tensor
+                        else:  # split according to the given indices
+                            this_layer_indices: list = neuron_indices[layer_idx]
+                            expert_size = mid // num_experts
+                            tensors[states_dict_name] = torch.zeros_like(tensor)
+                            for expert_idx in range(num_experts):
+                                print(f"Initializing layer {layer_idx} expert {expert_idx} {ffn_type} using neurons with indices {this_layer_indices[expert_idx]}...")
+                                tensors[states_dict_name][expert_idx * expert_size: (expert_idx + 1) * expert_size] = tensor[this_layer_indices[expert_idx]].clone()
+
                     elif moe_type == "modulelist":
                         expert_size = mid // num_experts
                         for expert_idx in range(num_experts):
                             if mid_idx == 0:
-                                expert_tensor = tensor[
-                                    expert_idx
-                                    * expert_size : (expert_idx + 1)  # noqa: W503,E203
-                                    * expert_size  # noqa: W503
-                                ].clone()
+                                if neuron_indices is None:  # sequential split
+                                    expert_tensor = tensor[expert_idx * expert_size: (expert_idx + 1) * expert_size].clone()
+                                else:  # split according to the given indices
+                                    this_layer_indices: list = neuron_indices[layer_idx]
+                                    print(f"Initializing layer {layer_idx} expert {expert_idx} {ffn_type} using neurons with indices {this_layer_indices[expert_idx]}...")
+                                    expert_tensor = tensor[this_layer_indices[expert_idx]].clone()
                             else:
-                                expert_tensor = tensor[
-                                    :,
-                                    expert_idx
-                                    * expert_size : (expert_idx + 1)  # noqa: W503,E203
-                                    * expert_size,  # noqa: W503
-                                ].clone()
+                                if neuron_indices is None:  # sequential split
+                                    expert_tensor = tensor[:, expert_idx * expert_size: (expert_idx + 1) * expert_size].clone()
+                                else:  # split according to the given indices
+                                    this_layer_indices: list = neuron_indices[layer_idx]
+                                    print(f"Initializing layer {layer_idx} expert {expert_idx} {ffn_type} using neurons with indices {this_layer_indices[expert_idx]}...")
+                                    expert_tensor = tensor[:, this_layer_indices[expert_idx]].clone()
                             tensors[
                                 f"model.layers.{layer_idx}.block_sparse_moe.experts.{expert_idx}.{new_ffn_type}.weight"
                             ] = expert_tensor
+
                     elif moe_type == "scattermoe":
                         if mid_idx == 1:
                             tensor = tensor.view(mid, hsz)
-                        tensor = tensor.view(num_experts, mid // num_experts, hsz)
+
+                        expert_size = mid // num_experts
+                        if neuron_indices is None:  # sequential split
+                            tensor = tensor.view(num_experts, expert_size, hsz)
+                        else:  # split according to the given indices
+                            this_layer_indices: list = neuron_indices[layer_idx]
+                            temp_tensor = torch.zeros((num_experts, expert_size, hsz), device=tensor.device, dtype=tensor.dtype)
+                            for expert_idx in range(num_experts):
+                                print(f"Initializing layer {layer_idx} expert {expert_idx} {ffn_type} using neurons with indices {this_layer_indices[expert_idx]}...")
+                                temp_tensor[expert_idx] = tensor[this_layer_indices[expert_idx]].clone()
+                            tensor = temp_tensor
 
                         if new_ffn_type == "output_experts":
                             tensors[
@@ -160,7 +197,7 @@ def convert_safetensors(
                 # for the last file, take all the rest of the layers
                 if fi == len(tensor_filepaths) - 1:
                     contained_layers = (
-                        set(scattermoe_upgate_tensors.keys()) - visited_layers
+                            set(scattermoe_upgate_tensors.keys()) - visited_layers
                     )
 
                 for layer_idx in contained_layers:
@@ -193,6 +230,7 @@ def convert_safetensors(
     index = {"metadata": metadata, "weight_map": weight_map}
     dump_json(index, dump_folder / "model.safetensors.index.json", indent=2)
     assert total_size - total_gate_size == raw_total_size
+    # fmt: on
 
 
 if __name__ == "__main__":
@@ -203,6 +241,9 @@ if __name__ == "__main__":
     tgt_model_dir_prefix = "/mnt/petrelfs/zhutong/smoe/resources/llama-3-8b-mixtral"
     tgt_moe_types = ["modulelist", "megablocks", "scattermoe"]
 
+    neuron_indices_file = ""
+    gate_weights_file = ""
+
     for moe_type in tgt_moe_types:
         print(f"converting {moe_type}")
         convert_safetensors(
@@ -211,6 +252,12 @@ if __name__ == "__main__":
             num_experts=num_experts,
             top_k=top_k,
             moe_type=moe_type,
+            neuron_indices=None
+            if neuron_indices_file == ""
+            else torch.load(neuron_indices_file),
+            gate_weights=None
+            if gate_weights_file == ""
+            else torch.load(gate_weights_file),
         )
 
         print(f"testing {moe_type}")
