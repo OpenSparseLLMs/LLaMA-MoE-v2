@@ -50,9 +50,7 @@ def main(args):
         this_size = np.random.randint(
             1, high=intermediate_size // num_experts + 1, size=num_experts
         )
-        diff = intermediate_size - np.sum(
-            this_size
-        )  # 调整列表中的数字，使总和达到目标值
+        diff = intermediate_size - np.sum(this_size)  # 调整列表中的数字，使总和达到目标值
         this_size[-1] += diff
         size_experts.append(this_size)
     print("size_experts: ", size_experts)
