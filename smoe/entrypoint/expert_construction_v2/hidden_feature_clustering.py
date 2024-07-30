@@ -25,6 +25,7 @@ from transformers import (
     LlamaForCausalLM,
     set_seed,
 )
+from transformers.models.llama.modeling_llama import LlamaMLP
 from transformers.trainer_utils import seed_worker
 
 from smoe.data.collate_fn import fault_tolerance_data_collator
@@ -48,7 +49,7 @@ class DataArguments:
         metadata={"help": "Path to dataset directory or a single jsonl file"},
     )
     model_max_length: int = field(
-        default=2048,
+        default=4096,
     )
 
 
@@ -73,18 +74,19 @@ class ClusteringArguments:
         },
     )
     max_iter: int = field(
-        default=500,
+        default=100,
         metadata={"help": "Number of iterations for K-Means to run."},
     )
     random_state: int = field(default=114514)
     n_jobs: int = field(
-        default=-1,
+        default=10,
         metadata={
-            "help": "Number of CPUs to use for multiple initializations of KMeans clustering. (-1 denotes all)"
+            "help": "Number of runs for K-Means to run in parallel. Should be over 0."
         },
     )
 
 
+# fmt: off
 def prepare_model_and_data(model_args, data_args, training_args):
     # Setup logging
     logging.basicConfig(
@@ -127,6 +129,7 @@ def prepare_model_and_data(model_args, data_args, training_args):
         "cache_dir": model_args.cache_dir,
         "revision": model_args.model_revision,
         "use_auth_token": True if model_args.use_auth_token else None,
+        "attn_implementation": "flash_attention_2"  # NOTE THIS
     }
 
     if model_args.config_name:
@@ -193,14 +196,11 @@ def prepare_model_and_data(model_args, data_args, training_args):
         )
         ModelClass = MODEL_MAP[model_args.model_type]
 
-        # config._attn_implementation = "eager"
-        # config._attn_implementation = "flash_attention_2"
-
         model: (
-            LlamaForCausalLM
-            | LlamaMoEForCausalLM
-            | LlamaMoEResidualForCausalLM
-            | MixtralForCausalLM
+                LlamaForCausalLM
+                | LlamaMoEForCausalLM
+                | LlamaMoEResidualForCausalLM
+                | MixtralForCausalLM
         ) = ModelClass.from_pretrained(
             model_args.model_name_or_path,
             from_tf=bool(".ckpt" in model_args.model_name_or_path),
@@ -282,95 +282,27 @@ def main():
     all_gate_weights = {}
 
     with torch.no_grad():
-        # 🔍 embedding layer
-        ## get hidden states
+        # 🔍 prepare forward kwargs (copied from LlamaModel)
+        ## initialize temp vars
         all_hidden_states = []
-        all_gathered_hidden_states = []
+        all_attn_kwargs = []
+
+        ## prepare inputs
         accelerator.print(f"Forward for embedding outputs!")
 
         for i, batch in tqdm(enumerate(dataloader)):
             if i >= training_args.max_steps:
                 break
-            hidden_states = accelerator.unwrap_model(model).model.embed_tokens(
-                batch["input_ids"]
-            )
-            gathered_hidden_states = (
-                accelerator.gather(hidden_states).cpu().float()
-            )  # 🔍 all gather across devices
-            gathered_hidden_states = gathered_hidden_states.reshape(-1, hidden_size)
-            if not accelerator.is_main_process:
-                gathered_hidden_states = (
-                    None  # only store the hidden states on the main process
-                )
-            hidden_states = hidden_states.cpu()
 
-            all_hidden_states.append(hidden_states)
-            all_gathered_hidden_states.append(gathered_hidden_states)
+            ## get embedded hidden states
+            hidden_states = accelerator.unwrap_model(model).model.embed_tokens(batch["input_ids"])
 
-        accelerator.print(f"Forward for embedding outputs done!")
-
-        ## perform clustering
-        if accelerator.is_main_process:
-            accelerator.print(f"Clustering for embedding outputs!")
-            all_gathered_hidden_states = torch.cat(all_gathered_hidden_states, dim=0)
-            all_gathered_hidden_states = all_gathered_hidden_states.numpy()
-
-            num_features = all_gathered_hidden_states.shape[0]
-            balanced_num_features = num_features // clustering_args.num_experts
-            min_cluster_size = max(
-                0, int(balanced_num_features * (1 - balance_jitter_factor))
-            )
-            max_cluster_size = min(
-                num_features, int(balanced_num_features * (1 + balance_jitter_factor))
-            )
-
-            print("ideally balanced cluster size:", balanced_num_features)
-            print("min cluster size:", min_cluster_size)
-            print("max cluster size:", max_cluster_size)
-
-            if clustering_args.distance_metric == "l2":
-                kmeans = KMeansConstrained(
-                    n_clusters=clustering_args.num_experts,
-                    size_min=min_cluster_size,
-                    size_max=max_cluster_size,
-                    tol=1e-1,
-                    max_iter=clustering_args.max_iter,
-                    random_state=clustering_args.random_state,
-                    n_jobs=clustering_args.n_jobs,
-                    verbose=True,
-                ).fit(all_gathered_hidden_states, None)
-            elif clustering_args.distance_metric == "cos":
-                kmeans = KMeansConstrainedCos(
-                    n_clusters=clustering_args.num_experts,
-                    size_min=min_cluster_size,
-                    size_max=max_cluster_size,
-                    tol=1e-1,
-                    max_iter=clustering_args.max_iter,
-                    random_state=clustering_args.random_state,
-                    n_jobs=clustering_args.n_jobs,
-                    verbose=True,
-                ).fit(all_gathered_hidden_states, None)
-            gate_weights = torch.from_numpy(kmeans.cluster_centers_)
-
-            all_gate_weights[0] = gate_weights  # add to all weights
-            accelerator.print(f"{gate_weights.shape}")
-
-            accelerator.print(f"Clustering for embedding outputs done!")
-        accelerator.wait_for_everyone()
-
-        # 🔍 prepare forward kwargs (copied from LlamaModel)
-        all_attn_kwargs = []
-
-        for hidden_states in all_hidden_states:
-            hidden_states.to(accelerator.device)
-
+            ## get attention kwargs
             output_attentions = False
             use_cache = False
 
             past_key_values = DynamicCache.from_legacy_cache(None)
-            past_seen_tokens = (
-                past_key_values.get_seq_length() if past_key_values is not None else 0
-            )
+            past_seen_tokens = past_key_values.get_seq_length() if past_key_values is not None else 0
             cache_position = torch.arange(
                 past_seen_tokens,
                 past_seen_tokens + hidden_states.shape[1],
@@ -380,7 +312,7 @@ def main():
 
             causal_mask = accelerator.unwrap_model(model).model._update_causal_mask(
                 batch.get("attention_mask"),
-                hidden_states.to(accelerator.device),
+                hidden_states,
                 cache_position,
                 past_key_values,
                 output_attentions,
@@ -394,52 +326,50 @@ def main():
                 "use_cache": use_cache,
                 "cache_position": cache_position,
             }
+
+            ## add to all
+            all_hidden_states.append(hidden_states.cpu())
             all_attn_kwargs.append(input_kwargs)
 
-            hidden_states.cpu()
+        accelerator.print(f"Forward for embedding outputs done!")
 
-        # 🔍 remaining layers
-        for i in range(num_hidden_layers - 1):
+        # 🔍 perform clustering for layers
+        for i in range(num_hidden_layers):
+            ## initialize temp vars
+            all_gathered_hidden_states = []
+
+            ## hooks
+            def _forward_hook_mlp(module, input, output):
+                """This hook captures the input features to the MLP layers"""
+                gathered_hidden_states = accelerator.gather(input[0]).cpu().float()  # 🔍 all gather across devices
+                gathered_hidden_states = gathered_hidden_states.reshape(-1, hidden_size)
+                if not accelerator.is_main_process:
+                    gathered_hidden_states = None  # only store the hidden states on the main process
+                all_gathered_hidden_states.append(gathered_hidden_states)
+
+            ## prepare layer
             layer = accelerator.unwrap_model(model).model.layers[i]
+            assert isinstance(layer.mlp, LlamaMLP)
+            layer.mlp.up_proj.register_forward_hook(_forward_hook_mlp)
 
             ## get hidden states
-            all_gathered_hidden_states = []
             accelerator.print(f"Forward for layer {i} outputs!")
-
             for j, hidden_states in tqdm(enumerate(all_hidden_states)):
                 hidden_states = hidden_states.to(accelerator.device)
                 hidden_states = layer(hidden_states, **all_attn_kwargs[j])[0]
-                gathered_hidden_states = (
-                    accelerator.gather(hidden_states).cpu().float()
-                )  # 🔍 all gather across devices
-                gathered_hidden_states = gathered_hidden_states.reshape(-1, hidden_size)
-                if not accelerator.is_main_process:
-                    gathered_hidden_states = (
-                        None  # only store the hidden states on the main process
-                    )
-
                 all_hidden_states[j] = hidden_states.cpu()
-                all_gathered_hidden_states.append(gathered_hidden_states)
-
             accelerator.print(f"Forward for layer {i} outputs done!")
 
             ## perform clustering
             if accelerator.is_main_process:
                 accelerator.print(f"Clustering for layer {i} outputs!")
-                all_gathered_hidden_states = torch.cat(
-                    all_gathered_hidden_states, dim=0
-                )
+                all_gathered_hidden_states = torch.cat(all_gathered_hidden_states, dim=0)
                 all_gathered_hidden_states = all_gathered_hidden_states.numpy()
 
                 num_features = all_gathered_hidden_states.shape[0]
                 balanced_num_features = num_features // clustering_args.num_experts
-                min_cluster_size = max(
-                    0, int(balanced_num_features * (1 - balance_jitter_factor))
-                )
-                max_cluster_size = min(
-                    num_features,
-                    int(balanced_num_features * (1 + balance_jitter_factor)),
-                )
+                min_cluster_size = max(0, int(balanced_num_features * (1 - balance_jitter_factor)))
+                max_cluster_size = min(num_features, int(balanced_num_features * (1 + balance_jitter_factor)), )
 
                 print("ideally balanced cluster size:", balanced_num_features)
                 print("min cluster size:", min_cluster_size)
@@ -451,6 +381,7 @@ def main():
                         size_min=min_cluster_size,
                         size_max=max_cluster_size,
                         tol=1e-1,
+                        n_init=clustering_args.n_jobs,
                         max_iter=clustering_args.max_iter,
                         random_state=clustering_args.random_state,
                         n_jobs=clustering_args.n_jobs,
@@ -462,6 +393,7 @@ def main():
                         size_min=min_cluster_size,
                         size_max=max_cluster_size,
                         tol=1e-1,
+                        n_init=clustering_args.n_jobs,
                         max_iter=clustering_args.max_iter,
                         random_state=clustering_args.random_state,
                         n_jobs=clustering_args.n_jobs,
@@ -469,7 +401,7 @@ def main():
                     ).fit(all_gathered_hidden_states, None)
                 gate_weights = torch.from_numpy(kmeans.cluster_centers_)
 
-                all_gate_weights[i + 1] = gate_weights  # add to all weights
+                all_gate_weights[i] = gate_weights  # add to all weights
                 accelerator.print(f"{gate_weights.shape}")
 
                 accelerator.print(f"Clustering for layer {i} outputs done!")
@@ -478,12 +410,12 @@ def main():
     # 🔍 save clustering results (gate weights)
     if accelerator.is_main_process:
         create_dir(clustering_args.save_path)
-        torch.save(
-            all_gate_weights, os.path.join(clustering_args.save_path, "gate_weights.pt")
-        )
+        torch.save(all_gate_weights, os.path.join(clustering_args.save_path, "gate_weights.pt"))
     accelerator.wait_for_everyone()
     accelerator.print("All done!")
 
+
+# fmt: on
 
 if __name__ == "__main__":
     main()

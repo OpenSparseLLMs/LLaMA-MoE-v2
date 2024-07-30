@@ -16,12 +16,25 @@
 # reserved spot auto
 
 {
-  model_path=/mnt/petrelfs/share_data/quxiaoye/models/Meta-Llama-3-8B-Instruct
+  model_path="/mnt/petrelfs/share_data/quxiaoye/models/Meta-Llama-3-8B-Instruct"
 
   criterion="max"
   share_neurons="False"
 
-  folder_name="8experts-0.2jitter"
+  #  folder_name="8experts-0.0jitter-l2"
+  #  folder_name="8experts-0.2jitter-l2"
+  #  folder_name="8experts-0.4jitter-l2"
+  folder_name="8experts-0.6jitter-l2"
+
+  #  folder_name="16experts-0.0jitter-l2"
+  #  folder_name="16experts-0.2jitter-l2"
+  #  folder_name="16experts-0.4jitter-l2"
+  #  folder_name="16experts-0.6jitter-l2"
+
+  #  folder_name="16experts-0.0jitter-cos"
+  #  folder_name="16experts-0.2jitter-cos"
+  #  folder_name="16experts-0.4jitter-cos"
+  #  folder_name="16experts-0.6jitter-cos"
 
   score_file="/mnt/petrelfs/dongdaize.d/workspace/llama-moe-v2/outputs/v2_mixtral_gate/${folder_name}/results/importance_scores.pt"
   output_dir="/mnt/petrelfs/dongdaize.d/workspace/llama-moe-v2/outputs/v2_mixtral_gate/${folder_name}"

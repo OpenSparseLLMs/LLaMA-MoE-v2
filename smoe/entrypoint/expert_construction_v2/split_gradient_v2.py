@@ -7,11 +7,13 @@ from tqdm import tqdm
 from transformers import LlamaConfig
 
 from smoe.utils.expert_construction.expert_split import GradientSplit
+from smoe.utils.io import create_dir
 from smoe.utils.operations.operation_string import str2bool
 
 
 class GradientSplitV2(GradientSplit):
-    # We only use the `split` function in `GradientSplit` here.
+    # Here we only use the `split` function in `GradientSplit`.
+    # Other functions may raise errors as the format of `self.labels` is changed.
     def __init__(self, config, layer, score_list):
         super().__init__(config, None, layer, score_list)
 
@@ -67,6 +69,7 @@ if __name__ == "__main__":
         neuron_indices[i] = split.labels
 
     # SAVE
+    create_dir(args.save_path)
     torch.save(neuron_indices, os.path.join(args.save_path, "neuron_indices.pt"))
     print("Done.")
     # fmt: on

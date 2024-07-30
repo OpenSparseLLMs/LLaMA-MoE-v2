@@ -25,7 +25,7 @@
   folder_name="8experts-0.2jitter"
   split_folder_name="split-gradient-max-ShareFalse"
 
-  save_path="/mnt/petrelfs/dongdaize.d/workspace/llama-moe-v2/outputs/v2_mixtral_gate/${folder_name}/models/${split_folder_name}-8S2"
+  save_path="/mnt/petrelfs/dongdaize.d/workspace/llama-moe-v2/outputs/v2_mixtral_gate/${folder_name}/models/${split_folder_name}-Top${top_k}"
   neuron_indices_file="/mnt/petrelfs/dongdaize.d/workspace/llama-moe-v2/outputs/v2_mixtral_gate/${folder_name}/results/${split_folder_name}/neuron_indices.pt"
   gate_weights_file="/mnt/petrelfs/dongdaize.d/workspace/llama-moe-v2/outputs/v2_mixtral_gate/${folder_name}/results/gate_weights.pt"
 
