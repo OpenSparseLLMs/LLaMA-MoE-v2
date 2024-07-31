@@ -38,6 +38,7 @@ from smoe.models.llama_moe_residual import (
 )
 from smoe.models.mixtral.configuration_mixtral import MixtralConfig
 from smoe.models.mixtral.modeling_mixtral import MixtralForCausalLM
+from smoe.models.mixtral_residual.modeling_mixtral_residual import MixtralResidualForCausalLM
 from smoe.modules.flash_attn import replace_xformers
 from smoe.trainer.llama_lr_scheduling import LlamaLrSchedulingTrainer
 from smoe.utils.config import (
@@ -54,6 +55,7 @@ MODEL_MAP = {
     "llama_moe": LlamaMoEForCausalLM,
     "llama_moe_residual": LlamaMoEResidualForCausalLM,
     "mixtral": MixtralForCausalLM,
+    "mixtral_residual": MixtralResidualForCausalLM,
 }
 
 CONFIG_MAPPING.update(
@@ -294,6 +296,7 @@ def main():
             | LlamaMoEForCausalLM
             | LlamaMoEResidualForCausalLM
             | MixtralForCausalLM
+            | MixtralResidualForCausalLM
         ) = ModelClass.from_pretrained(
             model_args.model_name_or_path,
             from_tf=bool(".ckpt" in model_args.model_name_or_path),

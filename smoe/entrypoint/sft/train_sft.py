@@ -13,6 +13,8 @@ from transformers import PreTrainedTokenizer, Trainer
 from transformers.trainer_pt_utils import LabelSmoother
 
 from smoe.models.mixtral import MixtralConfig, MixtralForCausalLM
+from smoe.models.mixtral_residual.configuration_mixtral_residual import MixtralResidualConfig
+from smoe.models.mixtral_residual.modeling_mixtral_residual import MixtralResidualForCausalLM
 from smoe.utils.conversation import Conversation
 from smoe.utils.io import load_json, load_jsonlines
 
@@ -348,6 +350,9 @@ def get_model(
     elif model_type == "v2_mixtral":
         ConfigClass = MixtralConfig
         ModelClass = MixtralForCausalLM
+    elif model_type =="v2_mixtral_residual":
+        ConfigClass = MixtralResidualConfig
+        ModelClass = MixtralResidualForCausalLM
     else:
         raise ValueError(f"Unknown model type: {model_type}")
 
