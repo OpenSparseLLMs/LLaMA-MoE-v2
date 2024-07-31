@@ -137,13 +137,13 @@ class ModelArguments:
             "help": "The type of gate, should be one of `TopKBalancedNoisyGate` and `SwitchBalancedGate`"
         },
     )
-    calculator_type: Literal["UniversalCalculator", "SwitchDropTokenCalculator"] = (
-        field(
-            default="UniversalCalculator",
-            metadata={
-                "help": "The type of gate calculator, should be one of `UniversalCalculator` and `SwitchDropTokenCalculator`"
-            },
-        )
+    calculator_type: Literal[
+        "UniversalCalculator", "SwitchDropTokenCalculator"
+    ] = field(
+        default="UniversalCalculator",
+        metadata={
+            "help": "The type of gate calculator, should be one of `UniversalCalculator` and `SwitchDropTokenCalculator`"
+        },
     )
     moe_calculator_score_scale_factor: float = field(
         default=4.0,

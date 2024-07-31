@@ -10,11 +10,9 @@ from functools import partial
 from pathlib import Path
 from typing import Any, Dict, Union
 
-from packaging import version
-
 # Integrations must be imported before ML frameworks:
 # isort: off
-from transformers.integrations import hp_params, is_fairscale_available
+from transformers.integrations import hp_params
 
 # isort: on
 
@@ -22,22 +20,19 @@ import datasets
 import torch
 import torch.distributed as dist
 import torch.nn as nn
+from packaging import version
 from torch.optim.lr_scheduler import LambdaLR
 from torch.utils.data import DataLoader
 
 # from torch.profiler import profile, schedule, tensorboard_trace_handler, ProfilerActivity
 from transformers.debug_utils import DebugOption, DebugUnderflowOverflow
 from transformers.deepspeed import deepspeed_init
-from transformers.dependency_versions_check import dep_version_check
-from transformers.modeling_utils import unwrap_model
-from transformers.models.auto.modeling_auto import MODEL_FOR_CAUSAL_LM_MAPPING_NAMES
 from transformers.pytorch_utils import ALL_LAYERNORM_LAYERS
 from transformers.trainer import OPTIMIZER_NAME, TRAINER_STATE_NAME, Trainer
 from transformers.trainer_callback import TrainerState
 from transformers.trainer_pt_utils import get_model_param_count, get_parameter_names
 from transformers.trainer_utils import (
     HPSearchBackend,
-    ShardedDDPOption,
     TrainOutput,
     has_length,
     seed_worker,
@@ -73,21 +68,13 @@ if is_sagemaker_mp_enabled():
 else:
     IS_SAGEMAKER_MP_POST_1_10 = False
 
-
 if is_torch_tpu_available(check_device=False):
     import torch_xla.core.xla_model as xm
     import torch_xla.debug.metrics as met
 
-
 if is_accelerate_available():
     from accelerate import __version__ as accelerate_version
     from accelerate import skip_first_batches
-
-
-if is_fairscale_available():
-    dep_version_check("fairscale")
-    from fairscale.optim import OSS
-
 
 logger = logging.get_logger(__name__)
 
@@ -201,37 +188,28 @@ class LlamaLrSchedulingTrainer(Trainer):
                 self.args
             )
 
-            if self.sharded_ddp == ShardedDDPOption.SIMPLE:
-                self.optimizer = OSS(
-                    params=optimizer_grouped_parameters,
-                    optim=optimizer_cls,
-                    **optimizer_kwargs,
-                )
-            else:
-                self.optimizer = optimizer_cls(
-                    optimizer_grouped_parameters, **optimizer_kwargs
-                )
-                if optimizer_cls.__name__ == "Adam8bit":
-                    import bitsandbytes
+            self.optimizer = optimizer_cls(
+                optimizer_grouped_parameters, **optimizer_kwargs
+            )
+            if optimizer_cls.__name__ == "Adam8bit":
+                import bitsandbytes
 
-                    manager = bitsandbytes.optim.GlobalOptimManager.get_instance()
+                manager = bitsandbytes.optim.GlobalOptimManager.get_instance()
 
-                    skipped = 0
-                    for module in opt_model.modules():
-                        if isinstance(module, nn.Embedding):
-                            skipped += sum(
-                                {
-                                    p.data_ptr(): p.numel() for p in module.parameters()
-                                }.values()
-                            )
-                            logger.info(f"skipped {module}: {skipped/2**20}M params")
-                            manager.register_module_override(
-                                module, "weight", {"optim_bits": 32}
-                            )
-                            logger.debug(
-                                f"bitsandbytes: will optimize {module} in fp32"
-                            )
-                    logger.info(f"skipped: {skipped/2**20}M params")
+                skipped = 0
+                for module in opt_model.modules():
+                    if isinstance(module, nn.Embedding):
+                        skipped += sum(
+                            {
+                                p.data_ptr(): p.numel() for p in module.parameters()
+                            }.values()
+                        )
+                        logger.info(f"skipped {module}: {skipped / 2 ** 20}M params")
+                        manager.register_module_override(
+                            module, "weight", {"optim_bits": 32}
+                        )
+                        logger.debug(f"bitsandbytes: will optimize {module} in fp32")
+                logger.info(f"skipped: {skipped / 2 ** 20}M params")
 
         if is_sagemaker_mp_enabled():
             self.optimizer = smp.DistributedOptimizer(self.optimizer)
@@ -607,7 +585,6 @@ class LlamaLrSchedulingTrainer(Trainer):
 
         delay_optimizer_creation = (
             self.sharded_ddp is not None
-            and self.sharded_ddp != ShardedDDPOption.SIMPLE
             or is_sagemaker_mp_enabled()
             or self.fsdp is not None
         )

@@ -113,7 +113,7 @@ kernel="" # should be set to `l1_norm`
 importance_type="" # should be set to `feature_change`
 ```
 
-After that, the importance vector files will be saved to the `save_path` with the following file structure: 
+After that, the importance vector files will be saved to the `save_path` with the following file structure:
 
 ```shell
 # this is an example with 16 data clusters

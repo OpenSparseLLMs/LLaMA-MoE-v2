@@ -13,6 +13,7 @@ from transformers.models.llama.modeling_llama import LlamaMLP
 
 from smoe.data.datasets_moe import ShardDataset
 from smoe.utils.expert_construction.k_means_constrained_cos import KMeansConstrainedCos
+from smoe.utils.io import delete_file_or_dir
 from smoe.utils.operations.operation_tensor import pass_kernel_function
 from smoe.utils.visualization.visualize import visualize_expert_neuron_overlap
 
@@ -451,8 +452,9 @@ class GradientSplit(LayerSplit):
         else:
             self.split_with_neuron_sharing(expert_num, expert_size, criterion)
 
-    def visualize(self, save_path, share_neurons=False):
+    def visualize(self, save_path, share_neurons=True):
         if share_neurons:  # 必须在share_neuron的情况下才可以可视化
+            delete_file_or_dir(os.path.join(save_path, "total_neurons.txt"))
             num_experts = len(self.labels)
             expert_size = len(self.labels[0])
 

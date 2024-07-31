@@ -175,7 +175,6 @@ smoe/entrypoint/analysis/gating_*.py
 /logs/
 /logs-cpt/
 /tensorboard/
-models/
 wandb/
 trace*.json
 tmp.json
