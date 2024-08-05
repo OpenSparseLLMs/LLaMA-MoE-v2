@@ -20,9 +20,9 @@
 
   moe_implementation_type="modulelist" #  modulelist megablocks scattermoe
   num_experts=8
-  top_k=2
+  top_k=4
 
-  folder_name="8experts-0.2jitter"
+  folder_name="8experts-0.4jitter-l2"
   split_folder_name="split-gradient-max-ShareFalse"
 
   save_path="/mnt/petrelfs/dongdaize.d/workspace/llama-moe-v2/outputs/v2_mixtral_gate/${folder_name}/models/${split_folder_name}-Top${top_k}"
