@@ -1,44 +1,52 @@
 set -x
 
-mkdir logs
-mkdir results
-
-
-queue_eval() {
-    result_name=$1
-    model_path=$2
-    nohup srun -p MoE --gres gpu:1 bash eval.sh smoe $model_path True results/$result_name 1>logs/$result_name.log 2>&1 &
-}
-
 multi_eval() {
-    result_name=$1
-    model_path=$2
-    for task_name in extend arc mmlu;
-    do
-        sleep 1
-        nohup srun -p MoE --gres gpu:1 -J "$task_name" bash eval.sh $task_name $model_path True results/$result_name 1>logs/$result_name-$task_name.log 2>&1 &
-    done
+  id_name=$1
+  result_name=$2
+  model_path=$3
+
+  mkdir logs/$id_name
+  mkdir results/$id_name
+  for task_name in extend arc mmlu; do
+    sleep 1
+    nohup srun -p MoE --gres gpu:1 -J "$task_name" bash eval.sh $task_name $model_path True results/$id_name/$result_name 1>logs/$id_name/$result_name-$task_name.log 2>&1 &
+  done
 }
 
 single_eval() {
-    task_name=$1
-    result_name=$2
-    model_path=$3
-    nohup srun -p MoE --gres gpu:1 -J "$task_name" bash eval.sh $task_name $model_path True results/$result_name 1>logs/$result_name-$task_name.log 2>&1 &
+  task_name=$1
+  id_name=$2
+  result_name=$3
+  model_path=$4
+
+  mkdir logs/$id_name
+  mkdir results/$id_name
+  nohup srun -p MoE --gres gpu:1 -J "$task_name" bash eval.sh $task_name $model_path True results/$id_name/$result_name 1>logs/$id_name/$result_name-$task_name.log 2>&1 &
 }
 
-{
-    # multi_eval "56e_top8_1k_3245958" /mnt/petrelfs/zhutong/smoe/outputs/v2_mixtral/mb_64e_top8/3245958/checkpoint-1000
-    # single_eval hellaswag "56e_top8_1k_3245958" /mnt/petrelfs/zhutong/smoe/outputs/v2_mixtral/mb_64e_top8/3245958/checkpoint-1000
-    # multi_eval "llama-3-8b-instruct" /mnt/petrelfs/share_data/quxiaoye/models/Meta-Llama-3-8B-Instruct
-    # multi_eval "56e_top8_raw_split" /mnt/petrelfs/zhutong/smoe/resources/llama-3-8b-mixtral-no-megablocks-56e-top8
-    # single_eval extend "56e_top8_2k_3245958" /mnt/petrelfs/zhutong/smoe/outputs/v2_mixtral/mb_64e_top8/3245958/checkpoint-2000
-    # multi_eval "56e_top8_3k_3245958" /mnt/petrelfs/zhutong/smoe/outputs/v2_mixtral/mb_64e_top8/3245958/checkpoint-3000
-    # single_eval arc "56e_top8_2k_3245958" /mnt/petrelfs/zhutong/smoe/outputs/v2_mixtral/mb_64e_top8/3245958/checkpoint-2000
-    # single_eval mmlu "56e_top8_2k_3245958" /mnt/petrelfs/zhutong/smoe/outputs/v2_mixtral/mb_64e_top8/3245958/checkpoint-2000
-    # multi_eval "scattermoe_56e_top8_2k_3274796" /mnt/petrelfs/zhutong/smoe/outputs/v2_mixtral/mb_64e_top8/3274796/checkpoint-2000
-    # multi_eval "megablocks_56e_top8_3k_3277430" "/mnt/petrelfs/zhutong/smoe/outputs/v2_mixtral/mb_64e_top8/3277430/checkpoint-3000"
-    # single_eval arc "megablocks_56e_top8_3k_3277430" "/mnt/petrelfs/zhutong/smoe/outputs/v2_mixtral/mb_64e_top8/3277430/checkpoint-3000"
-    # single_eval extend "megablocks_56e_top8_3k_3277430" "/mnt/petrelfs/zhutong/smoe/outputs/v2_mixtral/mb_64e_top8/3277430/checkpoint-3000"
-    single_eval extend "megablocks_56e_top8_4k_3277430" "/mnt/petrelfs/zhutong/smoe/outputs/v2_mixtral/mb_64e_top8/3277430/checkpoint-4000"
-}
+for lr in "8e-5" "4e-5" "2e-5" "1e-5" "8e-6" "4e-6" "2e-6" "1e-6"; do
+  ##############################################################
+  folder_name="dpo_mb_64e_top8-beta0.1-lr${lr}"
+  run_id="3361280"
+
+  result_name=${folder_name}
+  model_path="/mnt/petrelfs/dongdaize.d/workspace/llama-moe-v2/outputs/v2_mixtral/${folder_name}/${run_id}"
+
+  ##############################################################
+  #  result_name="baseline-sft"
+  #  model_path="/mnt/petrelfs/share_data/quxiaoye/checkpoint-11000-sft"
+
+  ##############################################################
+
+  log_dir="/mnt/petrelfs/dongdaize.d/workspace/llama-moe-v2/logs_eval"
+  mkdir -p ${log_dir}
+
+  for task_name in extend arc; do
+    OMP_NUM_THREADS=8 srun --quotatype=auto --partition=MoE --job-name=eval --mpi=pmi2 --gres=gpu:1 -n1 --ntasks-per-node=1 -c 16 --kill-on-bad-exit=1 \
+      bash /mnt/petrelfs/dongdaize.d/workspace/llama-moe-v2/scripts/v2_mixtral/eval/eval.sh \
+      $task_name \
+      $model_path True \
+      ${log_dir}/${result_name} &
+    sleep 1
+  done
+done

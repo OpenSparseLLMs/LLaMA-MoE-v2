@@ -11,7 +11,7 @@ from tqdm import tqdm
 from transformers import LlamaForCausalLM
 from transformers.models.llama.modeling_llama import LlamaMLP
 
-from smoe.entrypoint.expert_construction_v2.hidden_feature_clustering import (
+from smoe.entrypoint.expert_construction_v2.get_gates.hidden_feature_clustering import (
     prepare_model_and_data,
 )
 from smoe.utils.config import (
@@ -77,6 +77,7 @@ def main():
     gate_weights = move_tensors_to_device(gate_weights, device)  # move to the current device
 
     # 🔍 initialize temp vars
+    cached_attention_masks = None
     classified_cluster_ids = {}
     cached_features_intermediate = {}
 
@@ -99,8 +100,12 @@ def main():
     # 🔍 hooks
     def _forward_hook_input_token(module, input, output):
         """This hook captures the input features to the MLP layers and calculates the classified cluster ids for tokens"""
+        hidden_states = input[0]
+        if cached_attention_masks is not None:
+            hidden_states = hidden_states[cached_attention_masks]
+
         layer_id = module.layer_id
-        feature_logits = input[0].detach() @ gate_weights[layer_id].t().to(input[0].dtype)
+        feature_logits = hidden_states.detach() @ gate_weights[layer_id].t().to(hidden_states.dtype)
         classified_cluster_ids[layer_id] = torch.argmax(feature_logits, dim=-1)
 
         # if accelerator.is_main_process and layer_id == 0:
@@ -108,14 +113,22 @@ def main():
 
     def _forward_hook_intermediate(module, input, output):
         """This hook captures the intermediate features of the neurons"""
+        hidden_states = input[0]
+        if cached_attention_masks is not None:
+            hidden_states = hidden_states[cached_attention_masks]
+
         layer_id = module.layer_id
-        cached_features_intermediate[layer_id] = input[0].detach()
+        cached_features_intermediate[layer_id] = hidden_states.detach()
 
         # if accelerator.is_main_process and layer_id == 0:
         #     print("cached_features_intermediate", len(input), input[0].shape)
 
     def _backward_hook_intermediate(module, grad_in, grad_out):
         """This hook captures the backward gradients of the intermediate neurons, and calculates the corresponding importance scores"""
+        hidden_states_grad = grad_in[0]
+        if cached_attention_masks is not None:
+            hidden_states_grad = hidden_states_grad[cached_attention_masks]
+
         layer_id = module.layer_id
 
         # if accelerator.is_main_process and layer_id == 0:
@@ -127,7 +140,7 @@ def main():
         # add to the score cache
         for cluster_id in range(gate_weights[layer_id].shape[0]):  # iterate over clusters
             feature_mask: torch.BoolTensor = (classified_cluster_ids[layer_id] == cluster_id)
-            importance_score = grad_in[0][feature_mask].detach() * cached_features_intermediate[layer_id][feature_mask]
+            importance_score = hidden_states_grad[feature_mask].detach() * cached_features_intermediate[layer_id][feature_mask]
 
             # if accelerator.is_main_process and layer_id == layer_num - 1:
             #     print("input", cached_features_intermediate[layer_id][feature_mask].shape)
@@ -163,6 +176,8 @@ def main():
             with torch.cuda.device(device):
                 print(f"Used GPU memory ({device}) (before forward): " + str(int(torch.cuda.memory_allocated() / 1024 / 1024)) + " MB")
 
+        attention_mask = batch.get("attention_mask")
+        cached_attention_masks = attention_mask.bool().flatten() if attention_mask is not None else None
         outputs = model(**batch)
 
         if accelerator.is_main_process:

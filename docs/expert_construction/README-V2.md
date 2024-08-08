@@ -6,11 +6,11 @@ This documentation provides the procedures to convert a LLaMA model to LLaMA-MoE
 
 ### Gradient Split Plus
 
-First, run `scripts/expert_construction_v2/hidden_clustering.sh` to cluster the hidden_states of all layer inputs.
+First, run `scripts/expert_construction_v2/get_gates/hidden_clustering.sh` to cluster the hidden_states of all layer inputs.
 
-Then, run `scripts/expert_construction_v2/split_gradient_get_grads_v2.sh` to get the intermediate neuron-wise importance scores for each cluster in each layer.
+Then, run `scripts/expert_construction_v2/split/split_gradient_get_grads_v2.sh` to get the intermediate neuron-wise importance scores for each cluster in each layer.
 
-Finally, `run scripts/expert_construction_v2/split_gradient_v2.sh` to get the indices of all experts in all layers.
+Finally, `run scripts/expert_construction_v2/split/split_gradient_v2.sh` to get the indices of all experts in all layers.
 
 ## Convert
 
