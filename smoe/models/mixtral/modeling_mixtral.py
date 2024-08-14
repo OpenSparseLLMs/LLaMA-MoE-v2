@@ -1,29 +1,10 @@
-# coding=utf-8
-# Copyright 2023 Mistral AI and the HuggingFace Inc. team. All rights reserved.
-#
-# This code is based on EleutherAI's GPT-NeoX library and the GPT-NeoX
-# and OPT implementations in this library. It has been modified from its
-# original forms to accommodate minor architectural differences compared
-# to GPT-NeoX and OPT used by the Meta AI team that trained the model.
-#
-# Licensed under the Apache License, Version 2.0 (the "License");
-# you may not use this file except in compliance with the License.
-# You may obtain a copy of the License at
-#
-#     http://www.apache.org/licenses/LICENSE-2.0
-#
-# Unless required by applicable law or agreed to in writing, software
-# distributed under the License is distributed on an "AS IS" BASIS,
-# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
-# See the License for the specific language governing permissions and
-# limitations under the License.
 """ PyTorch Mixtral model."""
 import importlib
 import inspect
 import math
 import warnings
 from dataclasses import dataclass
-from typing import List, Optional, Tuple, Union
+from typing import Any, Dict, List, Optional, Tuple, Union
 
 import scattermoe
 import stk
@@ -31,26 +12,18 @@ import torch
 import torch.nn.functional as F
 import torch.utils.checkpoint
 from megablocks import grouped_gemm_util as gg
-from megablocks.layers import mpu
 from megablocks.layers.activation_fn import act_fn
 from megablocks.layers.arguments import Arguments as MegablocksArguments
 from megablocks.layers.dmlp_registry import _REGISTRY
 from megablocks.layers.dmoe import ParallelDroplessMLP
 from megablocks.layers.glu import memory_optimized_grouped_glu
-from megablocks.layers.mlp import resolve_dtensor
 from packaging import version
 from torch import nn
 from torch.nn import BCEWithLogitsLoss, CrossEntropyLoss, MSELoss
 from transformers.activations import ACT2FN
 from transformers.modeling_outputs import ModelOutput, SequenceClassifierOutputWithPast
 from transformers.modeling_utils import PreTrainedModel
-from transformers.utils import (
-    add_start_docstrings,
-    add_start_docstrings_to_model_forward,
-    is_torch_available,
-    logging,
-    replace_return_docstrings,
-)
+from transformers.utils import is_torch_available, logging
 from transformers.utils.import_utils import is_torch_fx_available
 
 from smoe.utils.cache_utils import Cache, DynamicCache
@@ -61,7 +34,6 @@ from .configuration_mixtral import MixtralConfig
 logger = logging.get_logger(__name__)
 
 _CONFIG_FOR_DOC = "MixtralConfig"
-
 
 parsed_torch_version_base = version.parse(version.parse(torch.__version__).base_version)
 is_torch_greater_or_equal_than_1_13 = parsed_torch_version_base >= version.parse("1.13")
@@ -592,6 +564,371 @@ class MixtralAttention(nn.Module):
         return attn_output, attn_weights, past_key_value
 
 
+# fmt: off
+# 🔍 Modified from DynamicCache
+class MoECache(Cache):
+    """
+    A cache that grows dynamically as more tokens are generated. This is the default for generative models.
+
+    It stores the Key and Value states as a list of tensors, one for each layer. The expected shape for each tensor is
+    `[batch_size, num_heads, seq_len, head_dim]`.
+    """
+
+    def __init__(self) -> None:
+        self.key_cache: List[torch.Tensor] = []
+        self.value_cache: List[torch.Tensor] = []
+        self.seen_tokens = 0  # Used in `generate` to keep tally of how many tokens the cache has seen
+        # TODO TODO TODO TODO TODO
+        raise NotImplementedError
+
+    def __getitem__(self, layer_idx: int) -> List[Tuple[torch.Tensor]]:
+        """
+        Support for backwards-compatible `past_key_value` indexing, e.g. `past_key_value[0][0].shape[2]` to get the
+        sequence length.
+        """
+        if layer_idx < len(self):
+            return (self.key_cache[layer_idx], self.value_cache[layer_idx])
+        else:
+            raise KeyError(
+                f"Cache only has {len(self)} layers, attempted to access layer with index {layer_idx}"
+            )
+
+    def __iter__(self):
+        """
+        Support for backwards-compatible `past_key_value` iteration, e.g. `for x in past_key_value:` to iterate over
+        keys and values
+        """
+        for layer_idx in range(len(self)):
+            yield (self.key_cache[layer_idx], self.value_cache[layer_idx])
+
+    def __len__(self):
+        """
+        Support for backwards-compatible `past_key_value` length, e.g. `len(past_key_value)`. This value corresponds
+        to the number of layers in the model.
+        """
+        return len(self.key_cache)
+
+    def update(
+            self,
+            key_states: torch.Tensor,
+            value_states: torch.Tensor,
+            layer_idx: int,
+            cache_kwargs: Optional[Dict[str, Any]] = None,
+    ) -> Tuple[torch.Tensor, torch.Tensor]:
+        """
+        Updates the cache with the new `key_states` and `value_states` for the layer `layer_idx`.
+
+        Parameters:
+            key_states (`torch.Tensor`):
+                The new key states to cache.
+            value_states (`torch.Tensor`):
+                The new value states to cache.
+            layer_idx (`int`):
+                The index of the layer to cache the states for.
+            cache_kwargs (`Dict[str, Any]`, `optional`):
+                Additional arguments for the cache subclass. No additional arguments are used in `DynamicCache`.
+
+        Return:
+            A tuple containing the updated key and value states.
+        """
+        # Update the number of seen tokens
+        if layer_idx == 0:
+            self.seen_tokens += key_states.shape[-2]
+
+        # Update the cache
+        if len(self.key_cache) <= layer_idx:
+            self.key_cache.append(key_states)
+            self.value_cache.append(value_states)
+        else:
+            self.key_cache[layer_idx] = torch.cat(
+                [self.key_cache[layer_idx], key_states], dim=-2
+            )
+            self.value_cache[layer_idx] = torch.cat(
+                [self.value_cache[layer_idx], value_states], dim=-2
+            )
+
+        return self.key_cache[layer_idx], self.value_cache[layer_idx]
+
+    def get_seq_length(self, layer_idx: Optional[int] = 0) -> int:
+        """Returns the sequence length of the cached states. A layer index can be optionally passed."""
+        if len(self.key_cache) <= layer_idx:
+            return 0
+        return self.key_cache[layer_idx].shape[-2]
+
+    def get_max_length(self) -> Optional[int]:
+        """Returns the maximum sequence length of the cached states. DynamicCache does not have a maximum length."""
+        return None
+
+    def reorder_cache(self, beam_idx: torch.LongTensor):
+        """Reorders the cache for beam search, given the selected beam indices."""
+        for layer_idx in range(len(self.key_cache)):
+            device = self.key_cache[layer_idx].device
+            self.key_cache[layer_idx] = self.key_cache[layer_idx].index_select(
+                0, beam_idx.to(device)
+            )
+            device = self.value_cache[layer_idx].device
+            self.value_cache[layer_idx] = self.value_cache[layer_idx].index_select(
+                0, beam_idx.to(device)
+            )
+
+    def to_legacy_cache(self) -> Tuple[Tuple[torch.Tensor], Tuple[torch.Tensor]]:
+        raise NotImplementedError
+
+    @classmethod
+    def from_legacy_cache(cls, past_key_values: Optional[Tuple[Tuple[torch.FloatTensor]]] = None) -> "MoECache":
+        raise NotImplementedError
+
+
+# 🔍 Modified from MixtralAttention
+class MixtralAttentionMoE(MixtralAttention):
+    def __init__(self, config: MixtralConfig, layer_idx: Optional[int] = None):
+        super(MixtralAttention, self).__init__()  # 🔍 init using nn.Module
+        self.config = config
+        self.layer_idx = layer_idx
+        if layer_idx is None:
+            logger.warning_once(
+                f"Instantiating {self.__class__.__name__} without passing `layer_idx` is not recommended and will "
+                "to errors during the forward call, if caching is used. Please make sure to provide a `layer_idx` "
+                "when creating this class."
+            )
+
+        self.hidden_size = config.hidden_size
+        self.num_heads = config.num_attention_heads
+        self.head_dim = self.hidden_size // self.num_heads
+        self.num_key_value_heads = config.num_key_value_heads
+        self.num_key_value_groups = self.num_heads // self.num_key_value_heads
+        self.max_position_embeddings = config.max_position_embeddings
+        self.rope_theta = config.rope_theta
+        self.is_causal = True
+        self.attention_dropout = config.attention_dropout
+
+        if (self.head_dim * self.num_heads) != self.hidden_size:
+            raise ValueError(
+                f"hidden_size must be divisible by num_heads (got `hidden_size`: {self.hidden_size}"
+                f" and `num_heads`: {self.num_heads})."
+            )
+
+        # 🔍
+        self.gate = nn.Linear(self.hidden_size, self.num_key_value_heads, bias=False)
+        self.softmax = nn.Softmax(dim=-1)
+        self.top_k_attn = config.top_k_attn
+        self.scale_factor_attn = config.scale_factor_attn
+
+        # 🔍
+        self.q_proj = nn.ModuleList([nn.Linear(self.hidden_size, self.num_key_value_groups * self.head_dim, bias=False) for _ in range(self.num_key_value_heads)])
+        self.k_proj = nn.ModuleList([nn.Linear(self.hidden_size, self.head_dim, bias=False) for _ in range(self.num_key_value_heads)])
+        self.v_proj = nn.ModuleList([nn.Linear(self.hidden_size, self.head_dim, bias=False) for _ in range(self.num_key_value_heads)])
+        self.o_proj = nn.ModuleList([nn.Linear(self.num_key_value_groups * self.head_dim, self.hidden_size, bias=False) for _ in range(self.num_key_value_heads)])
+
+        self.rotary_emb = MixtralRotaryEmbedding(
+            self.head_dim,
+            max_position_embeddings=self.max_position_embeddings,
+            base=self.rope_theta,
+        )
+
+    def forward(
+            self,
+            hidden_states: torch.Tensor,
+            attention_mask: Optional[torch.Tensor] = None,  # 🔍 This should be the Tensor with shape(bsz, seqlen) that represents the padding mask
+            position_ids: Optional[torch.LongTensor] = None,
+            past_key_value: Optional[Cache] = None,
+            output_attentions: bool = False,
+            use_cache: bool = False,
+            **kwargs,
+    ) -> Tuple[torch.Tensor, Optional[torch.Tensor], Optional[Tuple[torch.Tensor]]]:
+        if "padding_mask" in kwargs:
+            warnings.warn(
+                "Passing `padding_mask` is deprecated and will be removed in v4.37. Please make sure use `attention_mask` instead.`"
+            )
+        device = hidden_states.device
+        dtype = hidden_states.dtype
+        bsz, q_len, hidden_dim = hidden_states.size()
+        hidden_states = hidden_states.reshape(-1, hidden_dim)  # 🔍 flatten the dim
+        if attention_mask is not None:
+            attention_mask = attention_mask.reshape(-1)  # 🔍 flatten the dim
+
+        # 🔍 topk gating
+        router_logits = self.gate(hidden_states)  # (bsz * q_len, num_key_value_heads)
+        scores = F.softmax(router_logits, dim=1, dtype=torch.float)
+
+        routing_weights, selected_experts = torch.topk(scores, self.top_k_attn, dim=-1)  # (bsz * q_len, top_k_attn)
+        routing_weights /= routing_weights.sum(dim=-1, keepdim=True)
+        routing_weights = routing_weights.to(dtype)  # we cast back to the input dtype
+
+        # 🔍 moe selection
+        final_attn_output = torch.zeros_like(hidden_states).reshape(-1, hidden_dim)
+
+        # One hot encode the selected experts to create an expert mask
+        # this will be used to easily index which expert is going to be sollicitated
+        expert_mask = torch.nn.functional.one_hot(selected_experts, num_classes=self.num_key_value_heads)  # (bsz * q_len, top_k_attn, num_key_value_heads)
+        expert_mask = expert_mask.permute(2, 1, 0)  # (num_key_value_heads, top_k_attn, bsz * q_len)
+
+        # Loop over all available experts in the model and perform the computation on each expert
+        for expert_idx in range(self.num_key_value_heads):
+            # expert_mask[expert_idx]: (top_k_attn, bsz * q_len)
+            # idx: the topk position. (selected_num)
+            # top_x: token index. (selected_num)
+            idx, top_x = torch.nonzero(expert_mask[expert_idx], as_tuple=True)
+
+            if top_x.shape[0] == 0:
+                continue
+
+            # 🔍 Comment (DDZ): This is useless and even lags the speed, so I get it removed.
+            # in torch it is faster to index using lists than torch tensors
+            # top_x_list = top_x.tolist()
+            # idx_list = idx.tolist()
+
+            # 🔍 get routing info for this expert
+            current_batch_ids = (top_x // q_len)  # batch ids for current_state, (selected_num)
+            each_batch_selected_token_num = torch.bincount(current_batch_ids, minlength=bsz)  # (bsz)
+            max_attn_seq_len = each_batch_selected_token_num.max().item()
+
+            # 🔍 get the indices of each token in the hidden_state of this expert
+            selection_mask = torch.zeros((bsz * q_len,), device=device, dtype=torch.bool)  # the selection mask for this expert (this helps specify the position to put for each token)
+            selection_mask[top_x] = True
+            selection_mask = selection_mask.reshape(bsz, q_len)
+
+            token_position_indices = torch.cumsum(selection_mask, dim=1) - 1  # the sequence ids of all tokens in the current state, (bsz, q_len)
+            token_position_indices = token_position_indices.flatten()
+
+            current_seq_ids = token_position_indices[top_x]  # sequence ids for current_state, (selected_num)
+
+            # 🔍 initialize hidden_states for this expert
+            current_state = torch.empty((bsz, max_attn_seq_len, hidden_dim), dtype=dtype, device=device)
+            current_state[current_batch_ids, current_seq_ids] = hidden_states[top_x]  # assign tokens sparsely
+
+            # Normal Attention Forward
+            # ---------------------------------------------- #
+            query_states = self.q_proj[expert_idx](current_state)  # 🔍 specify expert
+            key_states = self.k_proj[expert_idx](current_state)  # 🔍 specify expert
+            value_states = self.v_proj[expert_idx](current_state)  # 🔍 specify expert
+
+            query_states = query_states.view(bsz, max_attn_seq_len, self.num_key_value_groups, self.head_dim).transpose(1, 2)  # 🔍 q_len -> max_attn_seq_len, num_heads -> num_key_value_groups
+            key_states = key_states.view(bsz, max_attn_seq_len, 1, self.head_dim).transpose(1, 2)  # 🔍 q_len -> max_attn_seq_len, num_key_value_heads -> 1
+            value_states = value_states.view(bsz, max_attn_seq_len, 1, self.head_dim).transpose(1, 2)  # 🔍 q_len -> max_attn_seq_len, num_key_value_heads -> 1
+
+            past_key_values_length = 0
+            kv_seq_len = key_states.shape[-2]
+            if past_key_value is not None:
+                if self.layer_idx is None:
+                    raise ValueError(
+                        f"The cache structure has changed since version v4.36. If you are using {self.__class__.__name__} "
+                        "for auto-regressive decoding with k/v caching, please make sure to initialize the attention class "
+                        "with a layer index."
+                    )
+                past_key_values_length = past_key_value.get_usable_length(kv_seq_len, self.layer_idx)  # TODO: add expert-wise support
+                kv_seq_len += past_key_values_length
+
+            # 🔍 create position_ids for selected tokens
+            current_position_ids = torch.zeros((bsz, max_attn_seq_len), device=device, dtype=torch.long)
+            current_position_ids[current_batch_ids, current_seq_ids] = position_ids.expand(bsz, q_len).flatten()[top_x]
+
+            cos, sin = self.rotary_emb(value_states, seq_len=current_position_ids.max().item() + 1)  # 🔍 adjust the seq_len to the maximum possible value
+            query_states, key_states = apply_rotary_pos_emb(query_states, key_states, cos, sin, current_position_ids)
+
+            if past_key_value is not None:
+                cache_kwargs = {"sin": sin, "cos": cos}  # Specific to RoPE models
+                key_states, value_states = past_key_value.update(key_states, value_states, self.layer_idx, cache_kwargs)  # TODO: add expert-wise support
+
+            # repeat k/v heads if n_kv_heads < n_heads
+            # Note (DDZ): here the dim is expanded internally, rather than concat-repeat. (Disable for Attention MoE)
+            # key_states = repeat_kv(key_states, self.num_key_value_groups)
+            # value_states = repeat_kv(value_states, self.num_key_value_groups)
+
+            attn_weights = torch.matmul(query_states, key_states.transpose(2, 3)) / math.sqrt(self.head_dim)  # softmax temperature
+
+            if attn_weights.size() != (bsz, self.num_key_value_groups, max_attn_seq_len, kv_seq_len):  # 🔍 q_len -> max_attn_seq_len, num_heads -> num_key_value_groups
+                raise ValueError(f"Attention weights should be of size {(bsz, self.num_key_value_groups, max_attn_seq_len, kv_seq_len)}, but is {attn_weights.size()}")
+
+            # 🔍 create attention mask with reduced seq_len
+            if attention_mask is not None:
+                current_attention_mask = torch.zeros((bsz, max_attn_seq_len), dtype=attention_mask.dtype, device=device)
+                current_attention_mask[current_batch_ids, current_seq_ids] = attention_mask[top_x]  # assign masks sparsely
+
+                current_attention_mask = _prepare_4d_causal_attention_mask(
+                    current_attention_mask,
+                    (bsz, max_attn_seq_len),
+                    current_state,
+                    past_key_values_length,
+                    sliding_window=self.config.sliding_window,
+                )
+
+                if current_attention_mask.size() != (bsz, 1, max_attn_seq_len, kv_seq_len):  # 🔍 q_len -> max_attn_seq_len
+                    raise ValueError(f"Attention mask should be of size {(bsz, 1, max_attn_seq_len, kv_seq_len)}, but is {attention_mask.size()}")
+
+                attn_weights = attn_weights + current_attention_mask  # 🔍
+
+            # upcast attention to fp32
+            attn_weights = nn.functional.softmax(attn_weights, dim=-1, dtype=torch.float32).to(query_states.dtype)
+            attn_weights = nn.functional.dropout(attn_weights, p=self.attention_dropout, training=self.training)
+            attn_output = torch.matmul(attn_weights, value_states)
+
+            if attn_output.size() != (bsz, self.num_key_value_groups, max_attn_seq_len, self.head_dim):  # 🔍 q_len -> max_attn_seq_len, num_heads -> num_key_value_groups
+                raise ValueError(f"`attn_output` should be of size {(bsz, self.num_heads, q_len, self.head_dim)}, but is {attn_output.size()}")
+
+            attn_output = attn_output.transpose(1, 2).contiguous()
+            attn_output = attn_output.reshape(bsz, max_attn_seq_len, self.num_key_value_groups * self.head_dim)  # 🔍 q_len -> max_attn_seq_len, hidden_size -> num_key_value_groups * head_dim
+            attn_output = self.o_proj[expert_idx](attn_output)
+            # ---------------------------------------------- #
+
+            # 🔍 select & rescale the outputs by softmax scores
+            attn_output = attn_output[current_batch_ids, current_seq_ids] * routing_weights[top_x, idx, None] * self.scale_factor_attn
+            # attn_output = attn_output[current_batch_ids, current_seq_ids] # this line for debug only
+
+            # 🔍 add to the final outputs
+            final_attn_output.index_add_(0, top_x, attn_output)
+
+        # 🔍 reshape
+        final_attn_output = final_attn_output.reshape(bsz, q_len, hidden_dim)
+
+        if not output_attentions:
+            attn_weights = None
+
+        return final_attn_output, attn_weights, past_key_value
+
+    @torch.no_grad()
+    def from_vanilla_attention(attention: MixtralAttention, top_k_attn, scale_factor_attn):
+        # config
+        layer_idx = attention.layer_idx
+        config = attention.config
+        config.top_k_attn = top_k_attn
+        config.scale_factor_attn = scale_factor_attn
+
+        # init
+        attention_moe = MixtralAttentionMoE(config, layer_idx)
+
+        # copy weights
+        num_key_value_groups = attention_moe.num_key_value_groups
+        head_dim = attention_moe.head_dim
+
+        # attention
+        # q_proj: (self.hidden_size, self.num_heads * self.head_dim)
+        # k_proj: (self.hidden_size, self.num_key_value_heads * self.head_dim)
+        # v_proj: (self.hidden_size, self.num_key_value_heads * self.head_dim)
+        # o_proj: (self.num_heads * self.head_dim, self.hidden_size)
+
+        # attention_moe
+        # q_proj: (self.hidden_size, self.num_key_value_groups * self.head_dim)
+        # k_proj: (self.hidden_size, self.head_dim)
+        # v_proj: (self.hidden_size, self.head_dim)
+        # o_proj: (self.num_key_value_groups * self.head_dim, self.hidden_size)
+
+        for i in range(config.num_key_value_heads):
+            indices_q_o = [j for j in range(head_dim * num_key_value_groups * i, head_dim * num_key_value_groups * (i + 1))]
+            indices_k_v = [j for j in range(head_dim * i, head_dim * (i + 1))]
+
+            # print(i, "indices_q_o", indices_q_o)
+            # print(i, "indices_k_v", indices_k_v)
+
+            attention_moe.q_proj[i].weight.data = attention.q_proj.weight.data[indices_q_o].clone()
+            attention_moe.k_proj[i].weight.data = attention.k_proj.weight.data[indices_k_v].clone()
+            attention_moe.v_proj[i].weight.data = attention.v_proj.weight.data[indices_k_v].clone()
+            attention_moe.o_proj[i].weight.data = attention.o_proj.weight.data[:, indices_q_o].clone()
+
+        return attention_moe
+# fmt: on
+
+
 # Copied from transformers.models.mistral.modeling_mistral.MistralFlashAttention2 with Mistral->Mixtral
 class MixtralFlashAttention2(MixtralAttention):
     """
@@ -605,6 +942,7 @@ class MixtralFlashAttention2(MixtralAttention):
         super().__init__(*args, **kwargs)
 
         # TODO (tzhu): for q_proj attention MoE, use concatenation instead of sum for the expert outputs
+        # 🔍 Comment (DDZ): I discard this implementation and use a new "AttentionMoE" class for elegance.
         # import copy
         # config = copy.deepcopy(self.config)
         # config.num_experts_per_tok = 8
@@ -955,6 +1293,12 @@ MISTRAL_ATTENTION_CLASSES = {
     "flash_attention_2": MixtralFlashAttention2,
 }
 
+# 🔍
+MISTRAL_ATTENTION_MOE_CLASSES = {
+    "eager": MixtralAttentionMoE,
+    "flash_attention_2": None,
+}
+
 
 class SimplifiedSparseGLU(nn.Module):
     def __init__(self, args: MegablocksArguments):
@@ -1109,18 +1453,6 @@ class MixtralSparseMoeBlock(nn.Module):
             self.experts = nn.ModuleList(
                 [MixtralBLockSparseTop2MLP(config) for _ in range(self.num_experts)]
             )
-        elif self.moe_type == "linearlist":
-            # tzhu: for attention experts (attention MoE)
-            self.experts = nn.ModuleList(
-                [
-                    nn.Linear(
-                        self.hidden_dim // config.num_attention_heads,
-                        self.hidden_dim,
-                        bias=False,
-                    )
-                    for _ in range(config.num_attention_heads)
-                ]
-            )
         elif self.moe_type == "megablocks":
             is_fp16 = self.gate.weight.dtype == torch.float16
             is_bf16 = self.gate.weight.dtype == torch.bfloat16
@@ -1224,9 +1556,15 @@ class MixtralDecoderLayer(nn.Module):
         super().__init__()
         self.hidden_size = config.hidden_size
 
-        self.self_attn = MISTRAL_ATTENTION_CLASSES[config._attn_implementation](
-            config, layer_idx
-        )
+        # 🔍
+        if config.use_attn_moe:
+            self.self_attn = MISTRAL_ATTENTION_MOE_CLASSES[config._attn_implementation](
+                config, layer_idx
+            )
+        else:
+            self.self_attn = MISTRAL_ATTENTION_CLASSES[config._attn_implementation](
+                config, layer_idx
+            )
 
         self.block_sparse_moe = MixtralSparseMoeBlock(config)
         self.input_layernorm = MixtralRMSNorm(
@@ -1305,27 +1643,6 @@ class MixtralDecoderLayer(nn.Module):
         return outputs
 
 
-MIXTRAL_START_DOCSTRING = r"""
-    This model inherits from [`PreTrainedModel`]. Check the superclass documentation for the generic methods the
-    library implements for all its model (such as downloading or saving, resizing the input embeddings, pruning heads
-    etc.)
-
-    This model is also a PyTorch [torch.nn.Module](https://pytorch.org/docs/stable/nn.html#torch.nn.Module) subclass.
-    Use it as a regular PyTorch Module and refer to the PyTorch documentation for all matter related to general usage
-    and behavior.
-
-    Parameters:
-        config ([`MixtralConfig`]):
-            Model configuration class with all the parameters of the model. Initializing with a config file does not
-            load the weights associated with the model, only the configuration. Check out the
-            [`~PreTrainedModel.from_pretrained`] method to load the model weights.
-"""
-
-
-@add_start_docstrings(
-    "The bare Mixtral Model outputting raw hidden-states without any specific head on top.",
-    MIXTRAL_START_DOCSTRING,
-)
 # Copied from transformers.models.mistral.modeling_mistral.MistralPreTrainedModel with Mistral->Mixtral
 class MixtralPreTrainedModel(PreTrainedModel):
     config_class = MixtralConfig
@@ -1348,77 +1665,6 @@ class MixtralPreTrainedModel(PreTrainedModel):
                 module.weight.data[module.padding_idx].zero_()
 
 
-MIXTRAL_INPUTS_DOCSTRING = r"""
-    Args:
-        input_ids (`torch.LongTensor` of shape `(batch_size, sequence_length)`):
-            Indices of input sequence tokens in the vocabulary. Padding will be ignored by default should you provide
-            it.
-
-            Indices can be obtained using [`AutoTokenizer`]. See [`PreTrainedTokenizer.encode`] and
-            [`PreTrainedTokenizer.__call__`] for details.
-
-            [What are input IDs?](../glossary#input-ids)
-        attention_mask (`torch.Tensor` of shape `(batch_size, sequence_length)`, *optional*):
-            Mask to avoid performing attention on padding token indices. Mask values selected in `[0, 1]`:
-
-            - 1 for tokens that are **not masked**,
-            - 0 for tokens that are **masked**.
-
-            [What are attention masks?](../glossary#attention-mask)
-
-            Indices can be obtained using [`AutoTokenizer`]. See [`PreTrainedTokenizer.encode`] and
-            [`PreTrainedTokenizer.__call__`] for details.
-
-            If `past_key_values` is used, optionally only the last `decoder_input_ids` have to be input (see
-            `past_key_values`).
-
-            If you want to change padding behavior, you should read [`modeling_opt._prepare_decoder_attention_mask`]
-            and modify to your needs. See diagram 1 in [the paper](https://arxiv.org/abs/1910.13461) for more
-            information on the default strategy.
-
-            - 1 indicates the head is **not masked**,
-            - 0 indicates the head is **masked**.
-        position_ids (`torch.LongTensor` of shape `(batch_size, sequence_length)`, *optional*):
-            Indices of positions of each input sequence tokens in the position embeddings. Selected in the range `[0,
-            config.n_positions - 1]`.
-
-            [What are position IDs?](../glossary#position-ids)
-        past_key_values (`tuple(tuple(torch.FloatTensor))`, *optional*, returned when `use_cache=True` is passed or when `config.use_cache=True`):
-            Tuple of `tuple(torch.FloatTensor)` of length `config.n_layers`, with each tuple having 2 tensors of shape
-            `(batch_size, num_heads, sequence_length, embed_size_per_head)`) and 2 additional tensors of shape
-            `(batch_size, num_heads, encoder_sequence_length, embed_size_per_head)`.
-
-            Contains pre-computed hidden-states (key and values in the self-attention blocks and in the cross-attention
-            blocks) that can be used (see `past_key_values` input) to speed up sequential decoding.
-
-            If `past_key_values` are used, the user can optionally input only the last `decoder_input_ids` (those that
-            don't have their past key value states given to this model) of shape `(batch_size, 1)` instead of all
-            `decoder_input_ids` of shape `(batch_size, sequence_length)`.
-        inputs_embeds (`torch.FloatTensor` of shape `(batch_size, sequence_length, hidden_size)`, *optional*):
-            Optionally, instead of passing `input_ids` you can choose to directly pass an embedded representation. This
-            is useful if you want more control over how to convert `input_ids` indices into associated vectors than the
-            model's internal embedding lookup matrix.
-        use_cache (`bool`, *optional*):
-            If set to `True`, `past_key_values` key value states are returned and can be used to speed up decoding (see
-            `past_key_values`).
-        output_attentions (`bool`, *optional*):
-            Whether or not to return the attentions tensors of all attention layers. See `attentions` under returned
-            tensors for more detail.
-        output_hidden_states (`bool`, *optional*):
-            Whether or not to return the hidden states of all layers. See `hidden_states` under returned tensors for
-            more detail.
-        output_router_logits (`bool`, *optional*):
-            Whether or not to return the logits of all the routers. They are useful for computing the router loss, and
-            should not be returned during inference.
-        return_dict (`bool`, *optional*):
-            Whether or not to return a [`~utils.ModelOutput`] instead of a plain tuple.
-"""
-
-
-@add_start_docstrings(
-    "The bare Mixtral Model outputting raw hidden-states without any specific head on top.",
-    MIXTRAL_START_DOCSTRING,
-)
 # Copied from transformers.models.mistral.modeling_mistral.MistralModel with MISTRAL->MIXTRAL,Mistral->Mixtral
 class MixtralModel(MixtralPreTrainedModel):
     """
@@ -1456,7 +1702,6 @@ class MixtralModel(MixtralPreTrainedModel):
         self.embed_tokens = value
 
     # Ignore copy
-    @add_start_docstrings_to_model_forward(MIXTRAL_INPUTS_DOCSTRING)
     def forward(
         self,
         input_ids: torch.LongTensor = None,
@@ -1544,7 +1789,9 @@ class MixtralModel(MixtralPreTrainedModel):
                     " call `tokenizer.padding_side  = 'left'` before tokenizing the input. "
                 )
 
-        if self._use_flash_attention_2:
+        if (
+            self._use_flash_attention_2 or self.config.use_attn_moe
+        ):  # 🔍 added special case for attention MoE
             # 2d mask is passed through the layers
             attention_mask = (
                 attention_mask
@@ -1593,16 +1840,6 @@ class MixtralModel(MixtralPreTrainedModel):
                     use_cache,
                 )
 
-                # layer_outputs = self._gradient_checkpointing_func(
-                #     decoder_layer.__call__,
-                #     hidden_states,
-                #     attention_mask,
-                #     position_ids,
-                #     past_key_values,
-                #     output_attentions,
-                #     output_router_logits,
-                #     use_cache,
-                # )
             else:
                 layer_outputs = decoder_layer(
                     hidden_states,
@@ -1696,10 +1933,6 @@ class MixtralForCausalLM(MixtralPreTrainedModel):
         if isinstance(module, MixtralModel):
             module.gradient_checkpointing = value
 
-    @add_start_docstrings_to_model_forward(MIXTRAL_INPUTS_DOCSTRING)
-    @replace_return_docstrings(
-        output_type=MoeCausalLMOutputWithPast, config_class=_CONFIG_FOR_DOC
-    )
     # Ignore copy
     def forward(
         self,
@@ -1715,32 +1948,6 @@ class MixtralForCausalLM(MixtralPreTrainedModel):
         output_router_logits: Optional[bool] = None,
         return_dict: Optional[bool] = None,
     ) -> Union[Tuple, MoeCausalLMOutputWithPast]:
-        r"""
-        Args:
-            labels (`torch.LongTensor` of shape `(batch_size, sequence_length)`, *optional*):
-                Labels for computing the masked language modeling loss. Indices should either be in `[0, ...,
-                config.vocab_size]` or -100 (see `input_ids` docstring). Tokens with indices set to `-100` are ignored
-                (masked), the loss is only computed for the tokens with labels in `[0, ..., config.vocab_size]`.
-
-        Returns:
-
-        Example:
-
-        ```python
-        >>> from transformers import AutoTokenizer, MixtralForCausalLM
-
-        >>> model = MixtralForCausalLM.from_pretrained(PATH_TO_CONVERTED_WEIGHTS)
-        >>> tokenizer = AutoTokenizer.from_pretrained(PATH_TO_CONVERTED_TOKENIZER)
-
-        >>> prompt = "Hey, are you conscious? Can you talk to me?"
-        >>> inputs = tokenizer(prompt, return_tensors="pt")
-
-        >>> # Generate
-        >>> generate_ids = model.generate(inputs.input_ids, max_length=30)
-        >>> tokenizer.batch_decode(generate_ids, skip_special_tokens=True, clean_up_tokenization_spaces=False)[0]
-        "Hey, are you conscious? Can you talk to me?\nI'm not conscious, but I can talk to you."
-        ```"""
-
         output_attentions = (
             output_attentions
             if output_attentions is not None
@@ -1896,21 +2103,6 @@ class MixtralForCausalLM(MixtralPreTrainedModel):
         return reordered_past
 
 
-@add_start_docstrings(
-    """
-    The Mixtral Model transformer with a sequence classification head on top (linear layer).
-
-    [`MixtralForSequenceClassification`] uses the last token in order to do the classification, as other causal models
-    (e.g. GPT-2) do.
-
-    Since it does classification on the last token, it requires to know the position of the last token. If a
-    `pad_token_id` is defined in the configuration, it finds the last token that is not a padding token in each row. If
-    no `pad_token_id` is defined, it simply takes the last value in each row of the batch. Since it cannot guess the
-    padding tokens when `inputs_embeds` are passed instead of `input_ids`, it does the same (take the last value in
-    each row of the batch).
-    """,
-    MIXTRAL_START_DOCSTRING,
-)
 # Copied from transformers.models.llama.modeling_llama.LlamaForSequenceClassification with Llama->Mixtral, LLAMA->MIXTRAL
 class MixtralForSequenceClassification(MixtralPreTrainedModel):
     def __init__(self, config):
@@ -1928,7 +2120,6 @@ class MixtralForSequenceClassification(MixtralPreTrainedModel):
     def set_input_embeddings(self, value):
         self.model.embed_tokens = value
 
-    @add_start_docstrings_to_model_forward(MIXTRAL_INPUTS_DOCSTRING)
     def forward(
         self,
         input_ids: torch.LongTensor = None,

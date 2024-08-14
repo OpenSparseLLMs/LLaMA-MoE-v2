@@ -166,6 +166,9 @@ class MixtralConfig(PretrainedConfig):
         router_aux_loss_coef=0.001,
         act_rescale=True,
         moe_type: str = "modulelist",
+        use_attn_moe: bool = False,  # 🔍
+        top_k_attn: int = 7,  # 🔍
+        scale_factor_attn: float = None,  # 🔍
         **kwargs,
     ):
         self.vocab_size = vocab_size
@@ -200,6 +203,14 @@ class MixtralConfig(PretrainedConfig):
         self.scale_factor = kwargs.pop(
             "scale_factor", self.num_local_experts / self.num_experts_per_tok
         )
+
+        # 🔍 for Attention MoE
+        self.use_attn_moe = use_attn_moe
+        self.top_k_attn = top_k_attn
+        self.scale_factor_attn = (
+            scale_factor_attn if scale_factor_attn is not None else num_key_value_heads
+        )
+
         # Attention implementation to use, if relevant.
         self._attn_implementation_internal = kwargs.pop("attn_implementation", None)
 

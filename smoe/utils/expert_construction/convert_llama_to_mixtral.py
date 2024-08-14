@@ -43,13 +43,13 @@ FFN_TYPE_MAP = {
 
 
 def convert_safetensors(
-        model_dir,
-        dump_dir,
-        num_experts: int,
-        top_k: int,
-        moe_type: str,
-        neuron_indices: dict = None,
-        gate_weights: dict = None,
+    model_dir,
+    dump_dir,
+    num_experts: int,
+    top_k: int,
+    moe_type: str,
+    neuron_indices: dict = None,
+    gate_weights: dict = None,
 ):
     # fmt: off
     model_folder = Path(model_dir)
@@ -267,7 +267,11 @@ if __name__ == "__main__":
             gate_weights=None if gate_weights_file == "" else torch.load(gate_weights_file),
         )
 
-        # print(f"testing {moe_type}")
-        # m = MixtralForCausalLM.from_pretrained(f"{tgt_model_dir_prefix}")
+        print(f"testing {moe_type}")
+        m = MixtralForCausalLM.from_pretrained(f"{tgt_model_dir_prefix}").bfloat16()
 
+        print(f"Re-saving {moe_type}")
+        m.save_pretrained(f"{tgt_model_dir_prefix}")
+
+        print("Done")
     # fmt: on

@@ -2,7 +2,9 @@ import argparse
 
 import torch
 
-from smoe.utils.expert_construction.convert_llama_to_mixtral_residual import convert_residual_safetensors
+from smoe.utils.expert_construction.convert_llama_to_mixtral_residual import (
+    convert_residual_safetensors,
+)
 
 if __name__ == "__main__":
     # fmt: off

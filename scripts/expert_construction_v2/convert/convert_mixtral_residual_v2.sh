@@ -27,10 +27,8 @@
   #  split_folder_name="split-gradient-max-ShareFalse-2Residual-6MoE"
 
   save_path="/mnt/petrelfs/share_data/quxiaoye/llama_moe_v2/converted_models/${split_folder_name}-Top${top_k}"
-  #  save_path="/mnt/petrelfs/dongdaize.d/workspace/llama-moe-v2/outputs/v2_mixtral_gate/${folder_name}/models/${split_folder_name}-Top${top_k}"
-
-  neuron_indices_file="/mnt/petrelfs/dongdaize.d/workspace/llama-moe-v2/outputs/v2_mixtral_gate/${folder_name}/results/${split_folder_name}/neuron_indices.pt"
-  gate_weights_file="/mnt/petrelfs/dongdaize.d/workspace/llama-moe-v2/outputs/v2_mixtral_gate/${folder_name}/results/gate_weights.pt"
+  neuron_indices_file="/mnt/petrelfs/share_data/quxiaoye/llama_moe_v2/v2_mixtral_gate/${folder_name}/results/${split_folder_name}/neuron_indices.pt"
+  gate_weights_file="/mnt/petrelfs/share_data/quxiaoye/llama_moe_v2/v2_mixtral_gate/${folder_name}/results/gate_weights.pt"
 
   srun python smoe/entrypoint/expert_construction_v2/convert/convert_mixtral_residual_v2.py \
     --model_path ${model_path} \
