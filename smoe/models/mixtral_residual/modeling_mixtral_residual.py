@@ -1168,7 +1168,9 @@ class MixtralResidualSparseMoeBlock(nn.Module):
                 expert_layer = self.experts[expert_idx]
                 idx, top_x = torch.where(expert_mask[expert_idx])
 
-                if top_x.shape[0] == 0:
+                if (
+                    top_x.shape[0] == 0 and not self.training
+                ):  # skip during training will lead to asynchrony among different GPUs and blocks the training!
                     continue
 
                 # in torch it is faster to index using lists than torch tensors

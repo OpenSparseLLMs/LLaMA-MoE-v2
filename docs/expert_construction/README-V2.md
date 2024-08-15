@@ -26,4 +26,8 @@ If you want to specify the layer-wise gate weights, please pass `--gate_weights_
 
 ### Convert to Residual LLaMA-MoE-V2
 
-Coming soon... 🙀
+This is almost the same as the above. Just run `scripts/expert_construction_v2/convert/convert_mixtral_residual_v2.sh`.
+
+## Convert Attention MoE
+
+This need to be done on an existing model. You should run `scripts/expert_construction_v2/convert/convert_mixtral_attn_moe.sh`.

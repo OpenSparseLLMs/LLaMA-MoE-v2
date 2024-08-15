@@ -70,11 +70,13 @@ attn = MixtralAttention(config, layer_idx=0)
 attn_moe = MixtralAttentionMoE.from_vanilla_attention(
     attn, top_k_attn=top_k_attn, scale_factor_attn=scale_factor_attn
 )
+# attn.eval()
+# attn_moe.eval()
 
 """input"""
 
 collator = tensor_stack_padding_collater(padding_id=0, padding_position="right")
-tensors = [torch.randperm(i) + 1 for i in [2, 5, 6, 7, 5]]
+tensors = [torch.randperm(i) + 1 for i in [2, 5, 6]]
 input_ids, attention_mask = collator(tensors)
 
 """attn input"""

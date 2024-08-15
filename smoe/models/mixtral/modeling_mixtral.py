@@ -770,7 +770,7 @@ class MixtralAttentionMoE(MixtralAttention):
             # top_x: token index. (selected_num)
             idx, top_x = torch.nonzero(expert_mask[expert_idx], as_tuple=True)
 
-            if top_x.shape[0] == 0:
+            if top_x.shape[0] == 0 and not self.training:  # skip during training will lead to asynchrony among different GPUs and blocks the training!
                 continue
 
             # 🔍 Comment (DDZ): This is useless and even lags the speed, so I get it removed.
@@ -823,8 +823,9 @@ class MixtralAttentionMoE(MixtralAttention):
             current_position_ids = torch.zeros((bsz, max_attn_seq_len), device=device, dtype=torch.long)
             current_position_ids[current_batch_ids, current_seq_ids] = position_ids.expand(bsz, q_len).flatten()[top_x]
 
-            cos, sin = self.rotary_emb(value_states, seq_len=current_position_ids.max().item() + 1)  # 🔍 adjust the seq_len to the maximum possible value
-            query_states, key_states = apply_rotary_pos_emb(query_states, key_states, cos, sin, current_position_ids)
+            if top_x.shape[0] > 0:  # apply only when there are tokens
+                cos, sin = self.rotary_emb(value_states, seq_len=current_position_ids.max().item() + 1)  # 🔍 adjust the seq_len to the maximum possible value
+                query_states, key_states = apply_rotary_pos_emb(query_states, key_states, cos, sin, current_position_ids)
 
             if past_key_value is not None:
                 cache_kwargs = {"sin": sin, "cos": cos}  # Specific to RoPE models
@@ -926,6 +927,8 @@ class MixtralAttentionMoE(MixtralAttention):
             attention_moe.o_proj[i].weight.data = attention.o_proj.weight.data[:, indices_q_o].clone()
 
         return attention_moe
+
+
 # fmt: on
 
 
@@ -1520,7 +1523,9 @@ class MixtralSparseMoeBlock(nn.Module):
                 expert_layer = self.experts[expert_idx]
                 idx, top_x = torch.where(expert_mask[expert_idx])
 
-                if top_x.shape[0] == 0:
+                if (
+                    top_x.shape[0] == 0 and not self.training
+                ):  # skip during training will lead to asynchrony among different GPUs and blocks the training!
                     continue
 
                 # in torch it is faster to index using lists than torch tensors

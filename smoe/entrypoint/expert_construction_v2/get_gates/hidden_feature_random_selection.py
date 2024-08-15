@@ -10,10 +10,7 @@ from typing import Optional
 import accelerate
 import torch
 from tqdm import tqdm
-from transformers import (
-    DynamicCache,
-    LlamaForCausalLM,
-)
+from transformers import DynamicCache, LlamaForCausalLM
 from transformers.models.llama.modeling_llama import LlamaMLP
 
 from smoe.entrypoint.expert_construction_v2.get_gates.hidden_feature_clustering import (
