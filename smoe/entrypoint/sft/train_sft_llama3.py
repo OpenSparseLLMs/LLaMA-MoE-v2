@@ -92,6 +92,10 @@ class TrainingArguments(transformers.TrainingArguments):
         default=True,
         metadata={"help": "Whether to save final checkpoint."},
     )
+    max_grad_norm: float = field(
+        default=1.0,
+        metadata={"help": "Max gradient norm."},
+    )
 
 
 def trainer_save_model_safe(trainer):
@@ -302,9 +306,10 @@ def get_model(
         config=config,
         cache_dir=cache_dir,
         torch_dtype=torch_dtype,
-        trust_remote_code=trust_remote_code,
+        trust_remote_code=trust_remote_code
     )
-
+    
+    # model.to('cuda')
     # model = ModelClass(config)
     logger.info("model ready")
 
@@ -408,6 +413,7 @@ def train():
         args=training_args,
         train_dataset=train_dataset,
         data_collator=fault_tolerance_data_collator,
+        # num_processes=1 # for flash_attention_2
     )
     logger.info("trainer ready")
 
@@ -423,7 +429,7 @@ def train():
     if training_args.save_final_ckpt:
         logger.info("training finished, dumping model")
         model.config.use_cache = True
-        trainer.save_state()
+        trainer.save_state()   # for debug, not save
         if trainer.is_deepspeed_enabled:
             trainer.save_model()
         else:

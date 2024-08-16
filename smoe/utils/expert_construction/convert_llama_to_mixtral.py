@@ -2,8 +2,11 @@ import re
 import shutil
 from collections import defaultdict
 from pathlib import Path
+import math
+import os.path
 
 import torch
+from torch.nn import init
 from safetensors import safe_open
 from safetensors.torch import save_file
 from transformers.modeling_utils import dtype_byte_size
@@ -116,9 +119,17 @@ def convert_safetensors(
                     # initialize gate weights
                     if layer_idx not in router_records:
                         if gate_weights is None:  # use newly initialized gate weights
+                            '''
                             tensors[
                                 f"model.layers.{layer_idx}.block_sparse_moe.gate.weight"
                             ] = torch.zeros(num_experts, hsz)  # TODO by DDZ: all zeros may be problematic here. I suggest using random initialization, where the initialization std should be adjusted according to the std of hidden features. You can try this out if possible.
+                            '''
+                            gate_weight = torch.zeros(num_experts, hsz)
+                            # init.kaiming_uniform_(gate_weight, a=0.02)
+                            gate_weight.uniform_(0,1)
+                            tensors[
+                                f"model.layers.{layer_idx}.block_sparse_moe.gate.weight"
+                            ] = gate_weight
                         else:  # use provided gate weights
                             print(f"Initializing layer {layer_idx} gate weights using {gate_weights[layer_idx]}...")
                             tensors[
@@ -234,12 +245,19 @@ def convert_safetensors(
 
 
 if __name__ == "__main__":
-    num_experts = 56
-    top_k = 8
+    num_experts = 8
+    top_k = 2
 
-    src_model_dir = "/mnt/petrelfs/share_data/quxiaoye/models/Meta-Llama-3-8B-Instruct"
-    tgt_model_dir_prefix = "/mnt/petrelfs/zhutong/smoe/resources/llama-3-8b-mixtral"
-    tgt_moe_types = ["modulelist", "megablocks", "scattermoe"]
+    # src_model_dir = "/mnt/petrelfs/share_data/quxiaoye/models/Meta-Llama-3-8B-Instruct"
+    src_model_dir = "/mnt/petrelfs/quxiaoye/models/Meta-Llama-3-8B-Instruct"
+    # src_model_dir = "/mnt/petrelfs/quxiaoye/models/Meta-Llama-3-8B"
+
+    # tgt_model_dir_prefix = "/mnt/petrelfs/zhutong/smoe/resources/llama-3-8b-mixtral"
+    tgt_model_dir_prefix = "/mnt/petrelfs/quxiaoye/models/llama-3-8b-instruct-mixtral-uniform"
+    # tgt_model_dir_prefix = "/mnt/petrelfs/quxiaoye/models/llama-3-8b-mixtral"
+
+    # tgt_moe_types = ["modulelist", "megablocks", "scattermoe"]
+    tgt_moe_types = ["modulelist"]
 
     neuron_indices_file = ""
     gate_weights_file = ""
@@ -260,7 +278,7 @@ if __name__ == "__main__":
             else torch.load(gate_weights_file),
         )
 
-        print(f"testing {moe_type}")
-        m = MixtralForCausalLM.from_pretrained(
-            f"{tgt_model_dir_prefix}-{moe_type}-{num_experts}e-top{top_k}",
-        )
+        # print(f"testing {moe_type}")
+        # m = MixtralForCausalLM.from_pretrained(
+        #     f"{tgt_model_dir_prefix}-{moe_type}-{num_experts}e-top{top_k}",
+        # )

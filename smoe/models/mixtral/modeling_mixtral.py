@@ -55,6 +55,7 @@ from transformers.utils.import_utils import is_torch_fx_available
 
 from smoe.utils.cache_utils import Cache, DynamicCache
 from smoe.utils.modeling_attn_mask_utils import _prepare_4d_causal_attention_mask
+from torch.distributions.normal import Normal
 
 from .configuration_mixtral import MixtralConfig
 
@@ -1105,6 +1106,24 @@ class MixtralSparseMoeBlock(nn.Module):
         # gating
         self.gate = nn.Linear(self.hidden_dim, self.num_experts, bias=False)
 
+        # add for noisy training, default
+        self.add_noise = True # config.add_noise
+        # self.add_noise = False # config.add_noise
+
+        self.noise_epsilon = 1e-2
+        if self.add_noise:
+            self.weight_noise = nn.Linear(self.hidden_dim, self.num_experts, bias=False)
+            self.weight_noise.weight.data = torch.zeros(
+                (self.num_experts, self.hidden_dim),
+                requires_grad=True,
+                device=self.weight_noise.weight.data.device,
+                dtype=self.weight_noise.weight.data.dtype,
+            )
+            self.mean = 0.0
+            self.std = 1.0
+            self.normal = Normal(self.mean, self.std)
+            self.softplus = nn.Softplus()
+
         if self.moe_type == "modulelist":
             self.experts = nn.ModuleList(
                 [MixtralBLockSparseTop2MLP(config) for _ in range(self.num_experts)]
@@ -1156,7 +1175,18 @@ class MixtralSparseMoeBlock(nn.Module):
         # router_logits: (batch * sequence_length, n_experts)
         router_logits = self.gate(hidden_states)
 
-        scores = F.softmax(router_logits, dim=1, dtype=torch.float)
+        # add for noise training
+        if self.training and self.add_noise:
+            # print("add noise during training ...")
+            noise_mm = self.weight_noise(hidden_states)  # 噪声矩阵计算结果
+            noise_control = self.softplus(noise_mm) + self.noise_epsilon  # 控制器得到的噪声增加量
+            logits_noise = torch.randn_like(router_logits) * noise_control  # noise附加的权重
+            logits = router_logits + logits_noise  # 最终权重
+            # logits = router_logits + torch.randn_like(router_logits)  # 最终权重
+        else:
+            logits = router_logits
+        
+        scores = F.softmax(logits, dim=1, dtype=torch.float)
         routing_weights, selected_experts = torch.topk(scores, self.top_k, dim=-1)
         routing_weights /= routing_weights.sum(dim=-1, keepdim=True)
         # we cast back to the input dtype
@@ -1188,9 +1218,11 @@ class MixtralSparseMoeBlock(nn.Module):
                 expert_layer = self.experts[expert_idx]
                 idx, top_x = torch.where(expert_mask[expert_idx])
 
+                # don't compute the expert if it's not selected
                 if top_x.shape[0] == 0:
+                    # print("Warning!!! No expert selected")   # 🔍
                     continue
-
+                
                 # in torch it is faster to index using lists than torch tensors
                 top_x_list = top_x.tolist()
                 idx_list = idx.tolist()

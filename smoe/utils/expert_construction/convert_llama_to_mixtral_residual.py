@@ -2,6 +2,8 @@ import re
 import shutil
 from collections import defaultdict
 from pathlib import Path
+import math
+import os.path
 
 import torch
 from safetensors import safe_open
@@ -103,7 +105,7 @@ def convert_residual_safetensors(
                             print(f"Initializing layer {layer_idx} gate weights using {gate_weights[layer_idx]}...")
                             tensors[
                                 f"model.layers.{layer_idx}.block_sparse_moe.gate.weight"
-                            ] = gate_weights[layer_idx]
+                            ] = gate_weights[layer_idx][:num_experts].clone()
                         router_records.add(layer_idx)
                     new_ffn_type = ffn_type_map[ffn_type]
 
