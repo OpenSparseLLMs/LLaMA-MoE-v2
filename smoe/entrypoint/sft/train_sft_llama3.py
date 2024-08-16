@@ -96,6 +96,10 @@ class TrainingArguments(transformers.TrainingArguments):
         default=1.0,
         metadata={"help": "Max gradient norm."},
     )
+    save_only_model: bool = field(
+        default=False,
+        metadata={"help": "Whether to save optimizer."},
+    )
 
 
 def trainer_save_model_safe(trainer):
@@ -360,9 +364,10 @@ def train():
     model_args, data_args, training_args = parser.parse_args_into_dataclasses()
     model_args: ModelArguments
     data_args: DataArguments
-    training_args: TrainingArguments
-    if "tensorboard" not in training_args.report_to:
-        training_args.report_to.append("tensorboard")
+    # donot report to tensorboard, may speed up training
+    # training_args: TrainingArguments
+    # if "tensorboard" not in training_args.report_to:
+    #     training_args.report_to.append("tensorboard")
     logger.info(f"model_args: {model_args}")
     logger.info(f"data_args: {data_args}")
     logger.info(f"training_args: {training_args}")

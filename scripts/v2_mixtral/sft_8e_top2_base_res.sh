@@ -1,13 +1,12 @@
 #!/usr/bin/bash
 
-#SBATCH --job-name=moe
+#SBATCH --job-name=moe-res
 #SBATCH --output=logs/%x-%j.log
 #SBATCH --error=logs/%x-%j.log
 
 #SBATCH --partition=llm_s
 #SBATCH --ntasks-per-node=1
 #SBATCH --cpus-per-task=16
-##SBATCH --mem=64G
 
 #SBATCH --nodes=4
 #SBATCH --gres=gpu:8
@@ -20,7 +19,8 @@
     # model_type="v2_mixtral"
     model_type="v2_mixtral_residual"
 
-    dataset_dir_or_path="/mnt/petrelfs/quxiaoye/models/OpenHermes-2.5/openhermes2_5.jsonl"
+    # dataset_dir_or_path="/mnt/petrelfs/quxiaoye/models/OpenHermes-2.5/openhermes2_5.jsonl"
+    dataset_dir_or_path="/mnt/petrelfs/quxiaoye/models/sft-v2/data.jsonl"
 
     # model_name_or_path="/mnt/petrelfs/quxiaoye/models/llama-3-8b-mixtral-modulelist-8e-top2"  # base version
     model_name_or_path="/mnt/petrelfs/quxiaoye/models/split-gradient-max-ShareFalse-1Residual-7MoE-Top1" # residual version
@@ -47,7 +47,7 @@
     echo "Node: $head_node"
 
     srun torchrun \
-    --nnodes 2 \
+    --nnodes 4 \
     --nproc_per_node 8 \
     --node_rank $SLURM_NODEID \
     --rdzv_id $RANDOM \
@@ -69,18 +69,19 @@
             --torch_dtype bfloat16 \
             --per_device_train_batch_size 4 \
             --per_device_eval_batch_size 4 \
-            --gradient_accumulation_steps 8 \
+            --gradient_accumulation_steps 2 \
             --num_train_epochs 3 \
             --save_strategy steps \
             --save_steps 1000 \
-            --save_total_limit 1 \
+            --save_total_limit 12 \
             --learning_rate 2e-5 \
             --weight_decay 0. \
             --warmup_ratio 0.03 \
             --lr_scheduler_type cosine \
-            --logging_steps 1 \
+            --logging_steps 10 \
             --model_max_length 2048 \
             --gradient_checkpointing True \
+            --save_only_model True \
             # --max_grad_norm 1.0  # Add this for nan gradient.  
             # --report_to wandb
 
