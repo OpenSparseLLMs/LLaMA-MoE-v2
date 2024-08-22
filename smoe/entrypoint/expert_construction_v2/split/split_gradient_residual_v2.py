@@ -16,13 +16,24 @@ class GradientSplitResidualV2(GradientSplitResidual):
     def __init__(self, config, layer, score_list):
         super().__init__(config, None, layer, score_list)
 
-    def split(self, expert_num_moe, expert_num_residual, expert_size, criterion="min", share_neurons=False):
-        super().split(expert_num_moe, expert_num_residual, expert_size, criterion, share_neurons)
+    def split(
+        self,
+        expert_num_moe,
+        expert_num_residual,
+        expert_size,
+        criterion="min",
+        share_neurons=False,
+    ):
+        super().split(
+            expert_num_moe, expert_num_residual, expert_size, criterion, share_neurons
+        )
 
         # 修改一个小细节，将结果以字典形式保存
         new_labels = {}
 
-        new_labels["residual"] = [i for neuron_ids in self.labels[:expert_num_residual] for i in neuron_ids]
+        new_labels["residual"] = [
+            i for neuron_ids in self.labels[:expert_num_residual] for i in neuron_ids
+        ]
         for expert_id in range(expert_num_moe):
             new_labels[expert_id] = self.labels[expert_num_residual + expert_id]
 

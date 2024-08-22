@@ -128,13 +128,9 @@ class Llama3ConversationTemplate(Conversation):
         self.message_template_system: str = (
             "<|start_header_id|>{role}<|end_header_id|>\n\n{message}<|eot_id|>"
         )
-        self.message_template_human: str = (
-            "<|start_header_id|>{role}<|end_header_id|>\n\n{message}<|eot_id|><|start_header_id|>{role2}<|end_header_id|>\n\n"
-        )
-        self.message_template_gpt: str = (
-            "{message}<|eot_id|>"
-        )
-        
+        self.message_template_human: str = "<|start_header_id|>{role}<|end_header_id|>\n\n{message}<|eot_id|><|start_header_id|>{role2}<|end_header_id|>\n\n"
+        self.message_template_gpt: str = "{message}<|eot_id|>"
+
         self.gen_template: str = "<|start_header_id|>{role}<|end_header_id|>"
         # The names of two roles
         self.fs_to_role = {"human": "user", "gpt": "assistant", "system": "system"}
@@ -161,7 +157,7 @@ class Llama3ConversationTemplate(Conversation):
         if add_eos:
             ret += self.eos
         return ret
-    
+
     def get_new_prompt(self, add_eos: bool = False) -> str:
         """Get the prompt for generation."""
         ret_all = ""
@@ -170,12 +166,20 @@ class Llama3ConversationTemplate(Conversation):
             ctxt_role = self.fs_to_role[role]
             if message:
                 if ctxt_role == "user":
-                    ret_all += self.message_template_human.format(role="user", message=message, role2="assistant")
-                    ret_source += self.message_template_human.format(role="user", message=message, role2="assistant")
+                    ret_all += self.message_template_human.format(
+                        role="user", message=message, role2="assistant"
+                    )
+                    ret_source += self.message_template_human.format(
+                        role="user", message=message, role2="assistant"
+                    )
                 elif ctxt_role == "system":
-                    ret_all += self.message_template_system.format(role="system", message=message)
-                    ret_source += self.message_template_system.format(role="system", message=message)
-                else: 
+                    ret_all += self.message_template_system.format(
+                        role="system", message=message
+                    )
+                    ret_source += self.message_template_system.format(
+                        role="system", message=message
+                    )
+                else:
                     ret_all += self.message_template_gpt.format(message=message)
             else:
                 ret_all += self.gen_template.format(role=ctxt_role)
@@ -184,7 +188,9 @@ class Llama3ConversationTemplate(Conversation):
         return ret_all, ret_source
 
     @classmethod
-    def parse(cls, messages: list, skip_system: bool = False, add_eos: bool = False) -> str:
+    def parse(
+        cls, messages: list, skip_system: bool = False, add_eos: bool = False
+    ) -> str:
         conv = cls()
         for j, turn in enumerate(messages):
             if skip_system and turn["from"] == "system":
@@ -192,4 +198,3 @@ class Llama3ConversationTemplate(Conversation):
             conv.append_message(turn["from"], turn["value"])
         # return conv.get_prompt(add_eos=add_eos)
         return conv.get_new_prompt(add_eos=add_eos)
-

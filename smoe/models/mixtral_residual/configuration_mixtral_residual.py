@@ -137,7 +137,7 @@ class MixtralResidualConfig(PretrainedConfig):
     >>> configuration = model.config
     ```"""
 
-    model_type = "mixtral_residual"   # 🔍
+    model_type = "mixtral_residual"  # 🔍
     keys_to_ignore_at_inference = ["past_key_values"]
 
     def __init__(

@@ -13,8 +13,12 @@ from transformers import PreTrainedTokenizer, Trainer
 from transformers.trainer_pt_utils import LabelSmoother
 
 from smoe.models.mixtral import MixtralConfig, MixtralForCausalLM
-from smoe.models.mixtral_residual.configuration_mixtral_residual import MixtralResidualConfig
-from smoe.models.mixtral_residual.modeling_mixtral_residual import MixtralResidualForCausalLM
+from smoe.models.mixtral_residual.configuration_mixtral_residual import (
+    MixtralResidualConfig,
+)
+from smoe.models.mixtral_residual.modeling_mixtral_residual import (
+    MixtralResidualForCausalLM,
+)
 from smoe.utils.conversation import Llama3ConversationTemplate
 from smoe.utils.io import load_json, load_jsonlines
 
@@ -282,7 +286,7 @@ def get_model(
     elif model_type == "v2_mixtral":
         ConfigClass = MixtralConfig
         ModelClass = MixtralForCausalLM
-    elif model_type =="v2_mixtral_residual":
+    elif model_type == "v2_mixtral_residual":
         ConfigClass = MixtralResidualConfig
         ModelClass = MixtralResidualForCausalLM
     else:
@@ -310,9 +314,9 @@ def get_model(
         config=config,
         cache_dir=cache_dir,
         torch_dtype=torch_dtype,
-        trust_remote_code=trust_remote_code
+        trust_remote_code=trust_remote_code,
     )
-    
+
     # model.to('cuda')
     # model = ModelClass(config)
     logger.info("model ready")
@@ -434,7 +438,7 @@ def train():
     if training_args.save_final_ckpt:
         logger.info("training finished, dumping model")
         model.config.use_cache = True
-        trainer.save_state()   # for debug, not save
+        trainer.save_state()  # for debug, not save
         if trainer.is_deepspeed_enabled:
             trainer.save_model()
         else:

@@ -1,9 +1,9 @@
+import math
+import os.path
 import re
 import shutil
 from collections import defaultdict
 from pathlib import Path
-import math
-import os.path
 
 import torch
 from safetensors import safe_open
@@ -11,21 +11,26 @@ from safetensors.torch import save_file
 from transformers.modeling_utils import dtype_byte_size
 
 from smoe.models.mixtral.configuration_mixtral import MixtralConfig
-from smoe.models.mixtral_residual.modeling_mixtral_residual import MixtralResidualForCausalLM
-from smoe.utils.expert_construction.convert_llama_to_mixtral import FFN_TYPE_MAP, is_safetensors_file
+from smoe.models.mixtral_residual.modeling_mixtral_residual import (
+    MixtralResidualForCausalLM,
+)
+from smoe.utils.expert_construction.convert_llama_to_mixtral import (
+    FFN_TYPE_MAP,
+    is_safetensors_file,
+)
 from smoe.utils.io import dump_json, load_json
 
 
 def convert_residual_safetensors(
-        model_dir,
-        dump_dir,
-        num_experts: int,
-        intermediate_size: int,  # 🔍
-        residual_intermediate_size: int,  # 🔍
-        top_k: int,
-        moe_type: str,
-        neuron_indices: dict = None,
-        gate_weights: dict = None,
+    model_dir,
+    dump_dir,
+    num_experts: int,
+    intermediate_size: int,  # 🔍
+    residual_intermediate_size: int,  # 🔍
+    top_k: int,
+    moe_type: str,
+    neuron_indices: dict = None,
+    gate_weights: dict = None,
 ):
     # fmt: off
     assert neuron_indices is not None  # 🔍 must pass the neuron indices
@@ -214,7 +219,9 @@ if __name__ == "__main__":
     top_k = 8
 
     src_model_dir = "/mnt/petrelfs/share_data/quxiaoye/models/Meta-Llama-3-8B-Instruct"
-    tgt_model_dir_prefix = "/mnt/petrelfs/zhutong/smoe/resources/llama-3-8b-mixtral-Residual"
+    tgt_model_dir_prefix = (
+        "/mnt/petrelfs/zhutong/smoe/resources/llama-3-8b-mixtral-Residual"
+    )
     tgt_moe_types = ["modulelist", "megablocks", "scattermoe"]
 
     neuron_indices_file = "xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx"

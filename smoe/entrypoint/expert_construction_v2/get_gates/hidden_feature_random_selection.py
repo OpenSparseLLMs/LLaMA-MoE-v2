@@ -32,7 +32,9 @@ from transformers.trainer_utils import seed_worker
 
 from smoe.data.collate_fn import fault_tolerance_data_collator
 from smoe.entrypoint.cpt.cpt_fpt import MODEL_MAP
-from smoe.entrypoint.expert_construction_v2.get_gates.hidden_feature_clustering import prepare_model_and_data
+from smoe.entrypoint.expert_construction_v2.get_gates.hidden_feature_clustering import (
+    prepare_model_and_data,
+)
 from smoe.entrypoint.sft.train_sft_llama3 import CachedJsonlDataset
 from smoe.models.llama_moe.modeling_llama_moe import LlamaMoEForCausalLM
 from smoe.models.llama_moe_residual import LlamaMoEResidualForCausalLM

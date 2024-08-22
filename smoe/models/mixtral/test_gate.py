@@ -40,7 +40,7 @@ expert_mask = torch.nn.functional.one_hot(
     selected_experts, num_classes=num_experts
 ).permute(2, 1, 0)
 
-'''  
+"""
 selected_experts:
 tensor([[3, 2],
         [0, 2],
@@ -51,9 +51,9 @@ tensor([[3, 2],
         [2, 0],
         [0, 1]])
 
-Each row denotes an expert, and each column denotes a token. 
+Each row denotes an expert, and each column denotes a token.
 There are two lines as top-2 tokens are selected.
-expert_mask: 
+expert_mask:
 tensor([[[0, 1, 0, 0, 0, 0, 0, 1],
          [0, 0, 0, 0, 0, 0, 1, 0]],
 
@@ -65,7 +65,7 @@ tensor([[[0, 1, 0, 0, 0, 0, 0, 1],
 
         [[1, 0, 0, 0, 0, 1, 0, 0],
          [0, 0, 1, 1, 1, 0, 0, 0]]])
-'''
+"""
 
 # Loop over all available experts in the model and perform the computation on each expert
 for expert_idx in range(num_experts):
@@ -73,15 +73,15 @@ for expert_idx in range(num_experts):
     idx, top_x = torch.where(expert_mask[expert_idx])
     print("top_x: ", top_x, top_x.shape)  # top_x: tensor([1, 2, 7])  torch.Size([3])
 
-    if expert_idx == 0: 
+    if expert_idx == 0:
         top_x_list = []
         idx_list = []
         top_x = torch.empty(0, dtype=torch.long)
 
-    if top_x.shape[0] == 0:  
+    if top_x.shape[0] == 0:
         # print("Warning!!! No expert selected")   # 🔍
         continue
-    
+
     # in torch it is faster to index using lists than torch tensors
     top_x_list = top_x.tolist()
     idx_list = idx.tolist()
@@ -93,15 +93,19 @@ for expert_idx in range(num_experts):
     current_state = hidden_states[None, top_x_list].reshape(-1, hidden_dim)
     current_hidden_states = (
         expert_layer(current_state)
-        * routing_weights[top_x_list, idx_list, None]  # may error when routing_weights[top_x_list, idx_list, None]
+        * routing_weights[
+            top_x_list, idx_list, None
+        ]  # may error when routing_weights[top_x_list, idx_list, None]
     )
 
-    import pdb; pdb.set_trace()
+    import pdb
+
+    pdb.set_trace()
     # However `index_add_` only support torch tensors for indexing so we'll use
     # the `top_x` tensor here.
     final_hidden_states.index_add_(
         0, top_x, current_hidden_states.to(hidden_states.dtype)
-    )  # why? when no token is choosen by this expert. 
+    )  # why? when no token is choosen by this expert.
 
 final_hidden_states = final_hidden_states.reshape(
     batch_size, sequence_length, hidden_dim
@@ -109,4 +113,6 @@ final_hidden_states = final_hidden_states.reshape(
 
 final_hidden_states.sum().backward()  # 🔍
 
-import pdb; pdb.set_trace()
+import pdb
+
+pdb.set_trace()

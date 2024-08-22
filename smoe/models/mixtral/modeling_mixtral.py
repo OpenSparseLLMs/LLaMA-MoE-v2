@@ -40,6 +40,7 @@ from megablocks.layers.glu import memory_optimized_grouped_glu
 from megablocks.layers.mlp import resolve_dtensor
 from packaging import version
 from torch import nn
+from torch.distributions.normal import Normal
 from torch.nn import BCEWithLogitsLoss, CrossEntropyLoss, MSELoss
 from transformers.activations import ACT2FN
 from transformers.modeling_outputs import ModelOutput, SequenceClassifierOutputWithPast
@@ -55,7 +56,6 @@ from transformers.utils.import_utils import is_torch_fx_available
 
 from smoe.utils.cache_utils import Cache, DynamicCache
 from smoe.utils.modeling_attn_mask_utils import _prepare_4d_causal_attention_mask
-from torch.distributions.normal import Normal
 
 from .configuration_mixtral import MixtralConfig
 
@@ -1107,7 +1107,7 @@ class MixtralSparseMoeBlock(nn.Module):
         self.gate = nn.Linear(self.hidden_dim, self.num_experts, bias=False)
 
         # add for noisy training, default
-        self.add_noise = True # config.add_noise
+        self.add_noise = True  # config.add_noise
         # self.add_noise = False # config.add_noise
 
         self.noise_epsilon = 1e-2
@@ -1185,7 +1185,7 @@ class MixtralSparseMoeBlock(nn.Module):
             # logits = router_logits + torch.randn_like(router_logits)  # 最终权重
         else:
             logits = router_logits
-        
+
         scores = F.softmax(logits, dim=1, dtype=torch.float)
         routing_weights, selected_experts = torch.topk(scores, self.top_k, dim=-1)
         routing_weights /= routing_weights.sum(dim=-1, keepdim=True)
@@ -1222,7 +1222,7 @@ class MixtralSparseMoeBlock(nn.Module):
                 if top_x.shape[0] == 0:
                     # print("Warning!!! No expert selected")   # 🔍
                     continue
-                
+
                 # in torch it is faster to index using lists than torch tensors
                 top_x_list = top_x.tolist()
                 idx_list = idx.tolist()

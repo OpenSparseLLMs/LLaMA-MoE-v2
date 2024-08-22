@@ -1,14 +1,14 @@
+import math
+import os.path
 import re
 import shutil
 from collections import defaultdict
 from pathlib import Path
-import math
-import os.path
 
 import torch
-from torch.nn import init
 from safetensors import safe_open
 from safetensors.torch import save_file
+from torch.nn import init
 from transformers.modeling_utils import dtype_byte_size
 
 from smoe.models.mixtral.configuration_mixtral import MixtralConfig
@@ -253,7 +253,9 @@ if __name__ == "__main__":
     # src_model_dir = "/mnt/petrelfs/quxiaoye/models/Meta-Llama-3-8B"
 
     # tgt_model_dir_prefix = "/mnt/petrelfs/zhutong/smoe/resources/llama-3-8b-mixtral"
-    tgt_model_dir_prefix = "/mnt/petrelfs/quxiaoye/models/llama-3-8b-instruct-mixtral-uniform"
+    tgt_model_dir_prefix = (
+        "/mnt/petrelfs/quxiaoye/models/llama-3-8b-instruct-mixtral-uniform"
+    )
     # tgt_model_dir_prefix = "/mnt/petrelfs/quxiaoye/models/llama-3-8b-mixtral"
 
     # tgt_moe_types = ["modulelist", "megablocks", "scattermoe"]

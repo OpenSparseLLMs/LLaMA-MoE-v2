@@ -14,7 +14,7 @@ from torch import cuda
 def print_gpu_memory(accelerator):
     if accelerator.is_local_main_process:
         for i in range(cuda.device_count()):
-            used_memory = cuda.memory_allocated(0) // 1024 ** 2
+            used_memory = cuda.memory_allocated(0) // 1024**2
             print(f"GPU {i} Used Memory: {used_memory}MB")
 
 
@@ -39,7 +39,7 @@ if getattr(torch, "bfloat16", None) is not None:
     dtype_memory_size_dict[torch.bfloat16] = 16 / 8
 if getattr(torch, "bool", None) is not None:
     dtype_memory_size_dict[torch.bool] = (
-            8 / 8
+        8 / 8
     )  # pytorch use 1 byte for a bool, see https://github.com/pytorch/pytorch/issues/41571
 
 
@@ -65,7 +65,7 @@ class MemTracker(object):
         self.print_detail = detail
         self.last_tensor_sizes = set()
         self.gpu_profile_fn = (
-                path + f"{datetime.datetime.now():%d-%b-%y-%H:%M:%S}-gpu_mem_track.txt"
+            path + f"{datetime.datetime.now():%d-%b-%y-%H:%M:%S}-gpu_mem_track.txt"
         )
         self.verbose = verbose
         self.begin = True
@@ -75,7 +75,7 @@ class MemTracker(object):
         for obj in gc.get_objects():
             try:
                 if torch.is_tensor(obj) or (
-                        hasattr(obj, "data") and torch.is_tensor(obj.data)
+                    hasattr(obj, "data") and torch.is_tensor(obj.data)
                 ):
                     tensor = obj
                 else:
@@ -91,10 +91,10 @@ class MemTracker(object):
             np.prod(np.array(tensor.size())) * get_mem_space(tensor.dtype)
             for tensor in self.get_tensors()
         ]
-        return np.sum(sizes) / 1024 ** 2
+        return np.sum(sizes) / 1024**2
 
     def get_allocate_usage(self):
-        return torch.cuda.memory_allocated() / 1024 ** 2
+        return torch.cuda.memory_allocated() / 1024**2
 
     def clear_cache(self):
         gc.collect()
@@ -105,7 +105,7 @@ class MemTracker(object):
             print(
                 x.size(),
                 x.dtype,
-                np.prod(np.array(x.size())) * get_mem_space(x.dtype) / 1024 ** 2,
+                np.prod(np.array(x.size())) * get_mem_space(x.dtype) / 1024**2,
                 file=file,
             )
 
@@ -115,11 +115,11 @@ class MemTracker(object):
         """
         frameinfo = inspect.stack()[1]
         where_str = (
-                frameinfo.filename
-                + " line "
-                + str(frameinfo.lineno)
-                + ": "
-                + frameinfo.function
+            frameinfo.filename
+            + " line "
+            + str(frameinfo.lineno)
+            + ": "
+            + frameinfo.function
         )
 
         with open(self.gpu_profile_fn, "a+") as f:
@@ -143,7 +143,7 @@ class MemTracker(object):
                         ts_list.count((x.size(), x.dtype)),
                         np.prod(np.array(x.size()))
                         * get_mem_space(x.dtype)
-                        / 1024 ** 2,
+                        / 1024**2,
                         x.dtype,
                     )
                     for x in self.get_tensors()
