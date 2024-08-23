@@ -31,13 +31,11 @@ import torch
 import torch.nn.functional as F
 import torch.utils.checkpoint
 from megablocks import grouped_gemm_util as gg
-from megablocks.layers import mpu
 from megablocks.layers.activation_fn import act_fn
 from megablocks.layers.arguments import Arguments as MegablocksArguments
 from megablocks.layers.dmlp_registry import _REGISTRY
 from megablocks.layers.dmoe import ParallelDroplessMLP
 from megablocks.layers.glu import memory_optimized_grouped_glu
-from megablocks.layers.mlp import resolve_dtensor
 from packaging import version
 from torch import nn
 from torch.distributions.normal import Normal
@@ -56,20 +54,18 @@ from transformers.utils.import_utils import is_torch_fx_available
 
 from smoe.utils.cache_utils import Cache, DynamicCache
 from smoe.utils.modeling_attn_mask_utils import _prepare_4d_causal_attention_mask
-
 from .configuration_mixtral import MixtralConfig
 
 logger = logging.get_logger(__name__)
 
 _CONFIG_FOR_DOC = "MixtralConfig"
 
-
 parsed_torch_version_base = version.parse(version.parse(torch.__version__).base_version)
 is_torch_greater_or_equal_than_1_13 = parsed_torch_version_base >= version.parse("1.13")
 
 
 def _is_package_available(
-    pkg_name: str, return_version: bool = False
+        pkg_name: str, return_version: bool = False
 ) -> Union[Tuple[bool, str], bool]:
     # Check we're not importing a "pkg_name" directory somewhere but the actual library by trying to grab the version
     package_exists = importlib.util.find_spec(pkg_name) is not None
@@ -255,7 +251,7 @@ if is_torch_fx_available():
 
 
 def load_balancing_loss_func(
-    gate_logits: torch.Tensor, num_experts: torch.Tensor = None, top_k=2
+        gate_logits: torch.Tensor, num_experts: torch.Tensor = None, top_k=2
 ) -> float:
     r"""
     Computes auxiliary load balancing loss as in Switch Transformer - implemented in Pytorch.
@@ -305,7 +301,7 @@ def load_balancing_loss_func(
     router_prob_per_group_and_expert = torch.mean(routing_weights, axis=-1)
     return torch.mean(
         tokens_per_group_and_expert * router_prob_per_group_and_expert.unsqueeze(-1)
-    ) * (num_experts**2)
+    ) * (num_experts ** 2)
 
 
 # Copied from transformers.models.llama.modeling_llama._get_unpad_data
@@ -350,7 +346,7 @@ class MixtralRotaryEmbedding(nn.Module):
         self.max_position_embeddings = max_position_embeddings
         self.base = base
         inv_freq = 1.0 / (
-            self.base ** (torch.arange(0, self.dim, 2).float().to(device) / self.dim)
+                self.base ** (torch.arange(0, self.dim, 2).float().to(device) / self.dim)
         )
         self.register_buffer("inv_freq", inv_freq, persistent=False)
 
@@ -388,7 +384,7 @@ class MixtralRotaryEmbedding(nn.Module):
 def rotate_half(x):
     """Rotates half the hidden dims of the input."""
     x1 = x[..., : x.shape[-1] // 2]
-    x2 = x[..., x.shape[-1] // 2 :]
+    x2 = x[..., x.shape[-1] // 2:]
     return torch.cat((-x2, x1), dim=-1)
 
 
@@ -496,14 +492,14 @@ class MixtralAttention(nn.Module):
         )
 
     def forward(
-        self,
-        hidden_states: torch.Tensor,
-        attention_mask: Optional[torch.Tensor] = None,
-        position_ids: Optional[torch.LongTensor] = None,
-        past_key_value: Optional[Cache] = None,
-        output_attentions: bool = False,
-        use_cache: bool = False,
-        **kwargs,
+            self,
+            hidden_states: torch.Tensor,
+            attention_mask: Optional[torch.Tensor] = None,
+            position_ids: Optional[torch.LongTensor] = None,
+            past_key_value: Optional[Cache] = None,
+            output_attentions: bool = False,
+            use_cache: bool = False,
+            **kwargs,
     ) -> Tuple[torch.Tensor, Optional[torch.Tensor], Optional[Tuple[torch.Tensor]]]:
         if "padding_mask" in kwargs:
             warnings.warn(
@@ -619,14 +615,14 @@ class MixtralFlashAttention2(MixtralAttention):
         self._flash_attn_uses_top_left_mask = not is_flash_attn_greater_or_equal_2_10()
 
     def forward(
-        self,
-        hidden_states: torch.Tensor,
-        attention_mask: Optional[torch.Tensor] = None,
-        position_ids: Optional[torch.LongTensor] = None,
-        past_key_value: Optional[Cache] = None,
-        output_attentions: bool = False,
-        use_cache: bool = False,
-        **kwargs,
+            self,
+            hidden_states: torch.Tensor,
+            attention_mask: Optional[torch.Tensor] = None,
+            position_ids: Optional[torch.LongTensor] = None,
+            past_key_value: Optional[Cache] = None,
+            output_attentions: bool = False,
+            use_cache: bool = False,
+            **kwargs,
     ):
         if "padding_mask" in kwargs:
             warnings.warn(
@@ -670,9 +666,9 @@ class MixtralFlashAttention2(MixtralAttention):
         )
 
         use_sliding_windows = (
-            _flash_supports_window_size
-            and getattr(self.config, "sliding_window", None) is not None
-            and kv_seq_len > self.config.sliding_window
+                _flash_supports_window_size
+                and getattr(self.config, "sliding_window", None) is not None
+                and kv_seq_len > self.config.sliding_window
         )
 
         if not _flash_supports_window_size:
@@ -685,9 +681,9 @@ class MixtralFlashAttention2(MixtralAttention):
             # Activate slicing cache only if the config has a value `sliding_windows` attribute
             cache_has_contents = past_key_value.get_seq_length(self.layer_idx) > 0
             if (
-                getattr(self.config, "sliding_window", None) is not None
-                and kv_seq_len > self.config.sliding_window
-                and cache_has_contents
+                    getattr(self.config, "sliding_window", None) is not None
+                    and kv_seq_len > self.config.sliding_window
+                    and cache_has_contents
             ):
                 slicing_tokens = 1 - self.config.sliding_window
 
@@ -765,15 +761,15 @@ class MixtralFlashAttention2(MixtralAttention):
         return attn_output, attn_weights, past_key_value
 
     def _flash_attention_forward(
-        self,
-        query_states,
-        key_states,
-        value_states,
-        attention_mask,
-        query_length,
-        dropout=0.0,
-        softmax_scale=None,
-        use_sliding_windows=False,
+            self,
+            query_states,
+            key_states,
+            value_states,
+            attention_mask,
+            query_length,
+            dropout=0.0,
+            softmax_scale=None,
+            use_sliding_windows=False,
     ):
         """
         Calls the forward method of Flash Attention - if the input hidden states contain at least one padding token
@@ -880,7 +876,7 @@ class MixtralFlashAttention2(MixtralAttention):
         return attn_output
 
     def _upad_input(
-        self, query_layer, key_layer, value_layer, attention_mask, query_length
+            self, query_layer, key_layer, value_layer, attention_mask, query_length
     ):
         batch_size, kv_seq_len, num_heads, head_dim = key_layer.shape
 
@@ -888,7 +884,7 @@ class MixtralFlashAttention2(MixtralAttention):
         # by slicing it on the proper place
         if kv_seq_len != attention_mask.shape[-1]:
             attention_mask_num_tokens = attention_mask.shape[-1]
-            attention_mask = attention_mask[:, attention_mask_num_tokens - kv_seq_len :]
+            attention_mask = attention_mask[:, attention_mask_num_tokens - kv_seq_len:]
 
         indices_k, cu_seqlens_k, max_seqlen_in_batch_k = _get_unpad_data(attention_mask)
 
@@ -1170,7 +1166,14 @@ class MixtralSparseMoeBlock(nn.Module):
 
     def forward(self, hidden_states: torch.Tensor) -> torch.Tensor:
         """ """
-        batch_size, sequence_length, hidden_dim = hidden_states.shape
+        input_dim = 3  # using for remove padding
+        if hidden_states.ndim == 3:  # ✨ normal
+            batch_size, sequence_length, hidden_dim = hidden_states.shape
+            non_padding_num = batch_size * sequence_length
+        else:  # ✨ flattened (non-padding)
+            non_padding_num, hidden_dim = hidden_states.shape
+            input_dim = 2
+
         hidden_states = hidden_states.view(-1, hidden_dim)
         # router_logits: (batch * sequence_length, n_experts)
         router_logits = self.gate(hidden_states)
@@ -1202,7 +1205,7 @@ class MixtralSparseMoeBlock(nn.Module):
             )
         else:
             final_hidden_states = torch.zeros(
-                (batch_size * sequence_length, hidden_dim),
+                (non_padding_num, hidden_dim),  # ✨
                 dtype=hidden_states.dtype,
                 device=hidden_states.device,
             )
@@ -1218,10 +1221,11 @@ class MixtralSparseMoeBlock(nn.Module):
                 expert_layer = self.experts[expert_idx]
                 idx, top_x = torch.where(expert_mask[expert_idx])
 
-                # don't compute the expert if it's not selected
+                ''' 
                 if top_x.shape[0] == 0:
                     # print("Warning!!! No expert selected")   # 🔍
                     continue
+                '''
 
                 # in torch it is faster to index using lists than torch tensors
                 top_x_list = top_x.tolist()
@@ -1232,8 +1236,8 @@ class MixtralSparseMoeBlock(nn.Module):
                 # states by `routing_weights` on the corresponding tokens (top-1 and top-2)
                 current_state = hidden_states[None, top_x_list].reshape(-1, hidden_dim)
                 current_hidden_states = (
-                    expert_layer(current_state)
-                    * routing_weights[top_x_list, idx_list, None]
+                        expert_layer(current_state)
+                        * routing_weights[top_x_list, idx_list, None]
                 )
 
                 # However `index_add_` only support torch tensors for indexing so we'll use
@@ -1242,9 +1246,10 @@ class MixtralSparseMoeBlock(nn.Module):
                     0, top_x, current_hidden_states.to(hidden_states.dtype)
                 )
 
-        final_hidden_states = final_hidden_states.reshape(
-            batch_size, sequence_length, hidden_dim
-        )
+        if input_dim == 3:  # ✨ normal
+            final_hidden_states = final_hidden_states.reshape(
+                batch_size, sequence_length, hidden_dim
+            )
 
         if self.act_rescale:
             final_hidden_states = final_hidden_states * self.scale_factor
@@ -1269,22 +1274,19 @@ class MixtralDecoderLayer(nn.Module):
         )
 
     def forward(
-        self,
-        hidden_states: torch.Tensor,
-        attention_mask: Optional[torch.Tensor] = None,
-        position_ids: Optional[torch.LongTensor] = None,
-        past_key_value: Optional[Tuple[torch.Tensor]] = None,
-        output_attentions: Optional[bool] = False,
-        output_router_logits: Optional[bool] = False,
-        use_cache: Optional[bool] = False,
-        **kwargs,
+            self,
+            hidden_states: torch.Tensor,
+            attention_mask: Optional[torch.Tensor] = None,
+            position_ids: Optional[torch.LongTensor] = None,
+            past_key_value: Optional[Tuple[torch.Tensor]] = None,
+            output_attentions: Optional[bool] = False,
+            output_router_logits: Optional[bool] = False,
+            use_cache: Optional[bool] = False,
+            padding_mask: Optional[torch.BoolTensor] = None,  # ✨
+            **kwargs,
     ) -> Tuple[
         torch.FloatTensor, Optional[Tuple[torch.FloatTensor, torch.FloatTensor]]
     ]:
-        if "padding_mask" in kwargs:
-            warnings.warn(
-                "Passing `padding_mask` is deprecated and will be removed in v4.37. Please make sure use `attention_mask` instead.`"
-            )
         """
         Args:
             hidden_states (`torch.FloatTensor`): input to the layer of shape `(batch, seq_len, embed_dim)`
@@ -1319,8 +1321,23 @@ class MixtralDecoderLayer(nn.Module):
 
         # Fully Connected
         residual = hidden_states
+
+        # padding_mask = kwargs.get("padding_mask")  # ✨ get padding mask
+
+        if padding_mask is not None:  # ✨ remove padding if possible
+            padding_mask.bool()
+            non_padding_indices = torch.nonzero(padding_mask, as_tuple=True)
+            # print("non_padding_indices: ", non_padding_indices)  # 🔍
+            hidden_states = hidden_states[non_padding_indices[0], non_padding_indices[1]]  # (non_padding_num, hidden_size)
+
         hidden_states = self.post_attention_layernorm(hidden_states)
         hidden_states, router_logits = self.block_sparse_moe(hidden_states)
+
+        if padding_mask is not None:  # ✨ add features back
+            new_hidden_states = torch.zeros_like(residual)
+            new_hidden_states[non_padding_indices[0], non_padding_indices[1]] = hidden_states
+            hidden_states = new_hidden_states
+
         hidden_states = residual + hidden_states
 
         outputs = (hidden_states,)
@@ -1490,17 +1507,17 @@ class MixtralModel(MixtralPreTrainedModel):
     # Ignore copy
     @add_start_docstrings_to_model_forward(MIXTRAL_INPUTS_DOCSTRING)
     def forward(
-        self,
-        input_ids: torch.LongTensor = None,
-        attention_mask: Optional[torch.Tensor] = None,
-        position_ids: Optional[torch.LongTensor] = None,
-        past_key_values: Optional[List[torch.FloatTensor]] = None,
-        inputs_embeds: Optional[torch.FloatTensor] = None,
-        use_cache: Optional[bool] = None,
-        output_attentions: Optional[bool] = None,
-        output_hidden_states: Optional[bool] = None,
-        output_router_logits: Optional[bool] = None,
-        return_dict: Optional[bool] = None,
+            self,
+            input_ids: torch.LongTensor = None,
+            attention_mask: Optional[torch.Tensor] = None,
+            position_ids: Optional[torch.LongTensor] = None,
+            past_key_values: Optional[List[torch.FloatTensor]] = None,
+            inputs_embeds: Optional[torch.FloatTensor] = None,
+            use_cache: Optional[bool] = None,
+            output_attentions: Optional[bool] = None,
+            output_hidden_states: Optional[bool] = None,
+            output_router_logits: Optional[bool] = None,
+            return_dict: Optional[bool] = None,
     ) -> Union[Tuple, MoeModelOutputWithPast]:
         output_attentions = (
             output_attentions
@@ -1576,6 +1593,15 @@ class MixtralModel(MixtralPreTrainedModel):
                     " call `tokenizer.padding_side  = 'left'` before tokenizing the input. "
                 )
 
+        # ✨ prepare for MoE forwarding
+        # print("Using padding_mask for gate logits computing! Please notice this !!!")
+        # if attention_mask is None:
+        #     padding_mask = None
+        # else:
+        #     padding_mask = attention_mask.bool()
+        padding_mask = None
+        # padding_mask = attention_mask.bool()
+
         if self._use_flash_attention_2:
             # 2d mask is passed through the layers
             attention_mask = (
@@ -1623,6 +1649,7 @@ class MixtralModel(MixtralPreTrainedModel):
                     output_attentions,
                     output_router_logits,
                     use_cache,
+                    padding_mask,
                 )
 
                 # layer_outputs = self._gradient_checkpointing_func(
@@ -1644,6 +1671,7 @@ class MixtralModel(MixtralPreTrainedModel):
                     output_attentions=output_attentions,
                     output_router_logits=output_router_logits,
                     use_cache=use_cache,
+                    padding_mask=padding_mask,
                 )
 
             hidden_states = layer_outputs[0]
@@ -1734,18 +1762,18 @@ class MixtralForCausalLM(MixtralPreTrainedModel):
     )
     # Ignore copy
     def forward(
-        self,
-        input_ids: torch.LongTensor = None,
-        attention_mask: Optional[torch.Tensor] = None,
-        position_ids: Optional[torch.LongTensor] = None,
-        past_key_values: Optional[List[torch.FloatTensor]] = None,
-        inputs_embeds: Optional[torch.FloatTensor] = None,
-        labels: Optional[torch.LongTensor] = None,
-        use_cache: Optional[bool] = None,
-        output_attentions: Optional[bool] = None,
-        output_hidden_states: Optional[bool] = None,
-        output_router_logits: Optional[bool] = None,
-        return_dict: Optional[bool] = None,
+            self,
+            input_ids: torch.LongTensor = None,
+            attention_mask: Optional[torch.Tensor] = None,
+            position_ids: Optional[torch.LongTensor] = None,
+            past_key_values: Optional[List[torch.FloatTensor]] = None,
+            inputs_embeds: Optional[torch.FloatTensor] = None,
+            labels: Optional[torch.LongTensor] = None,
+            use_cache: Optional[bool] = None,
+            output_attentions: Optional[bool] = None,
+            output_hidden_states: Optional[bool] = None,
+            output_router_logits: Optional[bool] = None,
+            return_dict: Optional[bool] = None,
     ) -> Union[Tuple, MoeCausalLMOutputWithPast]:
         r"""
         Args:
@@ -1851,12 +1879,12 @@ class MixtralForCausalLM(MixtralPreTrainedModel):
         )
 
     def prepare_inputs_for_generation(
-        self,
-        input_ids,
-        past_key_values=None,
-        attention_mask=None,
-        inputs_embeds=None,
-        **kwargs,
+            self,
+            input_ids,
+            past_key_values=None,
+            attention_mask=None,
+            inputs_embeds=None,
+            **kwargs,
     ):
         # Omit tokens covered by past_key_values
         if past_key_values is not None:
@@ -1873,10 +1901,10 @@ class MixtralForCausalLM(MixtralPreTrainedModel):
             # some of the inputs are exclusivelly passed as part of the cache (e.g. when passing input_embeds as
             # input)
             if (
-                attention_mask is not None
-                and attention_mask.shape[1] > input_ids.shape[1]
+                    attention_mask is not None
+                    and attention_mask.shape[1] > input_ids.shape[1]
             ):
-                input_ids = input_ids[:, -(attention_mask.shape[1] - past_length) :]
+                input_ids = input_ids[:, -(attention_mask.shape[1] - past_length):]
             # 2 - If the past_length is smaller than input_ids', then input_ids holds all input tokens. We can discard
             # input_ids based on the past_length.
             elif past_length < input_ids.shape[1]:
@@ -1885,9 +1913,9 @@ class MixtralForCausalLM(MixtralPreTrainedModel):
 
             # If we are about to go beyond the maximum cache length, we need to crop the input attention mask.
             if (
-                max_cache_length is not None
-                and attention_mask is not None
-                and cache_length + input_ids.shape[1] > max_cache_length
+                    max_cache_length is not None
+                    and attention_mask is not None
+                    and cache_length + input_ids.shape[1] > max_cache_length
             ):
                 attention_mask = attention_mask[:, -max_cache_length:]
 
@@ -1897,7 +1925,7 @@ class MixtralForCausalLM(MixtralPreTrainedModel):
             position_ids = attention_mask.long().cumsum(-1) - 1
             position_ids.masked_fill_(attention_mask == 0, 1)
             if past_key_values:
-                position_ids = position_ids[:, -input_ids.shape[1] :]
+                position_ids = position_ids[:, -input_ids.shape[1]:]
 
         # if `inputs_embeds` are passed, we only want to use them in the 1st generation step
         if inputs_embeds is not None and past_key_values is None:
@@ -1962,17 +1990,17 @@ class MixtralForSequenceClassification(MixtralPreTrainedModel):
 
     @add_start_docstrings_to_model_forward(MIXTRAL_INPUTS_DOCSTRING)
     def forward(
-        self,
-        input_ids: torch.LongTensor = None,
-        attention_mask: Optional[torch.Tensor] = None,
-        position_ids: Optional[torch.LongTensor] = None,
-        past_key_values: Optional[List[torch.FloatTensor]] = None,
-        inputs_embeds: Optional[torch.FloatTensor] = None,
-        labels: Optional[torch.LongTensor] = None,
-        use_cache: Optional[bool] = None,
-        output_attentions: Optional[bool] = None,
-        output_hidden_states: Optional[bool] = None,
-        return_dict: Optional[bool] = None,
+            self,
+            input_ids: torch.LongTensor = None,
+            attention_mask: Optional[torch.Tensor] = None,
+            position_ids: Optional[torch.LongTensor] = None,
+            past_key_values: Optional[List[torch.FloatTensor]] = None,
+            inputs_embeds: Optional[torch.FloatTensor] = None,
+            labels: Optional[torch.LongTensor] = None,
+            use_cache: Optional[bool] = None,
+            output_attentions: Optional[bool] = None,
+            output_hidden_states: Optional[bool] = None,
+            return_dict: Optional[bool] = None,
     ) -> Union[Tuple, SequenceClassifierOutputWithPast]:
         r"""
         labels (`torch.LongTensor` of shape `(batch_size,)`, *optional*):
@@ -2012,7 +2040,7 @@ class MixtralForSequenceClassification(MixtralPreTrainedModel):
         else:
             if input_ids is not None:
                 sequence_lengths = (
-                    torch.eq(input_ids, self.config.pad_token_id).int().argmax(-1) - 1
+                        torch.eq(input_ids, self.config.pad_token_id).int().argmax(-1) - 1
                 ).to(logits.device)
             else:
                 sequence_lengths = -1
@@ -2028,7 +2056,7 @@ class MixtralForSequenceClassification(MixtralPreTrainedModel):
                 if self.num_labels == 1:
                     self.config.problem_type = "regression"
                 elif self.num_labels > 1 and (
-                    labels.dtype == torch.long or labels.dtype == torch.int
+                        labels.dtype == torch.long or labels.dtype == torch.int
                 ):
                     self.config.problem_type = "single_label_classification"
                 else:

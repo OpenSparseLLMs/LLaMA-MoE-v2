@@ -126,7 +126,8 @@ def convert_safetensors(
                             '''
                             gate_weight = torch.zeros(num_experts, hsz)
                             # init.kaiming_uniform_(gate_weight, a=0.02)
-                            gate_weight.uniform_(0,1)
+                            # gate_weight.uniform_(0,1)
+                            init.normal_(gate_weight, mean=0.0, std=0.1)
                             tensors[
                                 f"model.layers.{layer_idx}.block_sparse_moe.gate.weight"
                             ] = gate_weight
@@ -254,7 +255,7 @@ if __name__ == "__main__":
 
     # tgt_model_dir_prefix = "/mnt/petrelfs/zhutong/smoe/resources/llama-3-8b-mixtral"
     tgt_model_dir_prefix = (
-        "/mnt/petrelfs/quxiaoye/models/llama-3-8b-instruct-mixtral-uniform"
+        "/mnt/petrelfs/quxiaoye/models/llama-3-8b-instruct-mixtral-normal"
     )
     # tgt_model_dir_prefix = "/mnt/petrelfs/quxiaoye/models/llama-3-8b-mixtral"
 

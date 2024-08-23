@@ -1,6 +1,6 @@
 #!/usr/bin/bash
 
-#SBATCH --job-name=moe-nores-km-drop2
+#SBATCH --job-name=moe-nores-km-droppad
 #SBATCH --output=logs/%x-%j.log
 #SBATCH --error=logs/%x-%j.log
 
@@ -26,6 +26,7 @@
     # model_name_or_path="/mnt/petrelfs/quxiaoye/models/llama-3-8b-instruct-mixtral-modulelist-8e-top2"  # instruct version
     # model_name_or_path="/mnt/petrelfs/quxiaoye/models/llama-3-8b-instruct-mixtral-uniform-modulelist-8e-top2"  # uniform instruct version
     model_name_or_path="/mnt/petrelfs/quxiaoye/models/llama-3-8b-instruct-mixtral-kaiming-modulelist-8e-top2"  # kaiming instruct version
+    # model_name_or_path="/mnt/petrelfs/quxiaoye/models/llama-3-8b-instruct-mixtral-normal-modulelist-8e-top2" # normal instruct version
 
     comment="llama-3-8b to mixtral-no-megablocks, 8 experts, top2"
     base_dir="outputs/v2_mixtral"
@@ -53,7 +54,7 @@
     --rdzv_id $RANDOM \
     --rdzv_backend c10d \
     --rdzv_endpoint $head_node:29522 \
-        -m smoe.entrypoint.sft.train_sft_llama3 \
+        -m smoe.entrypoint.sft.train_sft_llama3_nopad \
             --do_train \
             --freeze_gate False \
             --evaluation_strategy no \
@@ -70,7 +71,7 @@
             --per_device_train_batch_size 4 \
             --per_device_eval_batch_size 4 \
             --gradient_accumulation_steps 2 \
-            --num_train_epochs 2 \
+            --num_train_epochs 3 \
             --save_strategy steps \
             --save_steps 1000 \
             --save_total_limit 12 \
@@ -79,11 +80,11 @@
             --warmup_ratio 0.03 \
             --lr_scheduler_type cosine \
             --logging_steps 1 \
-            --model_max_length 2048 \
+            --model_max_length 4096 \
             --gradient_checkpointing True \
             --save_only_model True \
 
-    # training default with noise 
+    # training default with noise
 
     # srun torchrun \
     # --nnodes 1 \
@@ -126,7 +127,7 @@
 
 
 
-            # --max_grad_norm 1.0  # Add this for nan gradient.  
+            # --max_grad_norm 1.0  # Add this for nan gradient.
             # --report_to wandb
 
             # --gradient_accumulation_steps 8 \

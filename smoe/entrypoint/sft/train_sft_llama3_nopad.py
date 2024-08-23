@@ -13,8 +13,12 @@ from transformers import PreTrainedTokenizer, Trainer
 from transformers.trainer_pt_utils import LabelSmoother
 
 from smoe.models.mixtral import MixtralConfig, MixtralForCausalLM
-from smoe.models.mixtral_residual.configuration_mixtral_residual import MixtralResidualConfig
-from smoe.models.mixtral_residual.modeling_mixtral_residual import MixtralResidualForCausalLM
+from smoe.models.mixtral_residual.configuration_mixtral_residual import (
+    MixtralResidualConfig,
+)
+from smoe.models.mixtral_residual.modeling_mixtral_residual import (
+    MixtralResidualForCausalLM,
+)
 from smoe.utils.conversation import Llama3ConversationTemplate
 from smoe.utils.io import load_json, load_jsonlines
 
@@ -119,7 +123,7 @@ def preprocess(
     tokenizer: transformers.PreTrainedTokenizer,
 ) -> Dict:
     # Apply prompt templates
-    
+
     prompt, source_part = Llama3ConversationTemplate.parse(instances["conversations"])
 
     # Tokenize conversations
@@ -133,6 +137,7 @@ def preprocess(
 
     input_ids = res_conv["input_ids"]
     import copy
+
     targets = copy.deepcopy(input_ids)
 
     res_source = tokenizer(
@@ -145,9 +150,13 @@ def preprocess(
 
     source_length = res_source["input_ids"].shape[1]
 
-    targets[0][:source_length] = -100   # ignore loss for source part, the target is two dimensional tensor
+    targets[0][
+        :source_length
+    ] = -100  # ignore loss for source part, the target is two dimensional tensor
 
-    attention_masks = torch.tensor([[0 if input_id_seq == -100 else 1 for input_id_seq in input_ids[0]]])
+    attention_masks = torch.tensor(
+        [[0 if input_id_seq == -100 else 1 for input_id_seq in input_ids[0]]]
+    )
 
     return dict(
         input_ids=input_ids,
@@ -164,19 +173,35 @@ def simple_fault_tolerance_data_collator(features: list) -> dict[str, Any]:
     for feature in features:
         # Simple for llama3, we directly use '<|eot_id|>' (128009) for pad token. You should change for other models.
         feature["input_ids"] = torch.cat(
-            [feature["input_ids"], torch.tensor([128009] * (max_len - len(feature["input_ids"])), dtype=torch.long)]
+            [
+                feature["input_ids"],
+                torch.tensor(
+                    [128009] * (max_len - len(feature["input_ids"])), dtype=torch.long
+                ),
+            ]
         )
         feature["labels"] = torch.cat(
-            [feature["labels"], torch.tensor([-100] * (max_len - len(feature["labels"])), dtype=torch.long)]
+            [
+                feature["labels"],
+                torch.tensor(
+                    [-100] * (max_len - len(feature["labels"])), dtype=torch.long
+                ),
+            ]
         )
         feature["attention_mask"] = torch.cat(
-            [feature["attention_mask"], torch.tensor([0] * (max_len - len(feature["attention_mask"])), dtype=torch.long)]
+            [
+                feature["attention_mask"],
+                torch.tensor(
+                    [0] * (max_len - len(feature["attention_mask"])), dtype=torch.long
+                ),
+            ]
         )
 
     for k, v in first.items():
         batch[k] = torch.stack([f[k] for f in features])
-    
+
     return batch
+
 
 def fault_tolerance_data_collator(features: list) -> dict[str, Any]:
     if not isinstance(features[0], Mapping):
@@ -317,7 +342,7 @@ def get_model(
     elif model_type == "v2_mixtral":
         ConfigClass = MixtralConfig
         ModelClass = MixtralForCausalLM
-    elif model_type =="v2_mixtral_residual":
+    elif model_type == "v2_mixtral_residual":
         ConfigClass = MixtralResidualConfig
         ModelClass = MixtralResidualForCausalLM
     else:
@@ -345,9 +370,9 @@ def get_model(
         config=config,
         cache_dir=cache_dir,
         torch_dtype=torch_dtype,
-        trust_remote_code=trust_remote_code
+        trust_remote_code=trust_remote_code,
     )
-    
+
     # model.to('cuda')
     # model = ModelClass(config)
     logger.info("model ready")
@@ -470,7 +495,7 @@ def train():
     if training_args.save_final_ckpt:
         logger.info("training finished, dumping model")
         model.config.use_cache = True
-        trainer.save_state()   # for debug, not save
+        trainer.save_state()  # for debug, not save
         if trainer.is_deepspeed_enabled:
             trainer.save_model()
         else:
