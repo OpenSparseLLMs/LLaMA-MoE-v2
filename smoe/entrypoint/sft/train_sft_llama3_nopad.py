@@ -124,7 +124,7 @@ def preprocess(
 ) -> Dict:
     # Apply prompt templates
 
-    prompt, source_part = Llama3ConversationTemplate.parse(instances["conversations"])
+    prompt, source_part = Llama3ConversationTemplate.parse(instances["conversations"], skip_system=True)
 
     # Tokenize conversations
     res_conv = tokenizer(

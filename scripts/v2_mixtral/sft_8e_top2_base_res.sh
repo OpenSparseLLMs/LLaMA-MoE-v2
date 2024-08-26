@@ -1,6 +1,6 @@
 #!/usr/bin/bash
 
-#SBATCH --job-name=moe-res
+#SBATCH --job-name=moe-res-droppad-nosys-all
 #SBATCH --output=logs/%x-%j.log
 #SBATCH --error=logs/%x-%j.log
 
@@ -21,6 +21,7 @@
 
     # dataset_dir_or_path="/mnt/petrelfs/quxiaoye/models/OpenHermes-2.5/openhermes2_5.jsonl"
     dataset_dir_or_path="/mnt/petrelfs/quxiaoye/models/sft-v2/data.jsonl"
+    # dataset_dir_or_path="/mnt/petrelfs/quxiaoye/models/sft-v2/7M_commonsense_subjective.jsonl"
 
     # model_name_or_path="/mnt/petrelfs/quxiaoye/models/llama-3-8b-mixtral-modulelist-8e-top2"  # base version
     model_name_or_path="/mnt/petrelfs/quxiaoye/models/split-gradient-max-ShareFalse-1Residual-7MoE-Top1" # residual version
@@ -53,7 +54,7 @@
     --rdzv_id $RANDOM \
     --rdzv_backend c10d \
     --rdzv_endpoint $head_node:29522 \
-        -m smoe.entrypoint.sft.train_sft_llama3 \
+        -m smoe.entrypoint.sft.train_sft_llama3_nopad \
             --do_train \
             --freeze_gate False \
             --evaluation_strategy no \
@@ -79,7 +80,7 @@
             --warmup_ratio 0.03 \
             --lr_scheduler_type cosine \
             --logging_steps 10 \
-            --model_max_length 2048 \
+            --model_max_length 4096 \
             --gradient_checkpointing True \
             --save_only_model True \
             # --max_grad_norm 1.0  # Add this for nan gradient.
