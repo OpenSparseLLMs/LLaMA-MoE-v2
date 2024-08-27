@@ -20,7 +20,7 @@
 
   moe_implementation_type="modulelist" #  modulelist megablocks scattermoe
   num_experts=8
-  top_k=4
+  top_k=2
 
   folder_name="8experts-0.4jitter-l2"
   split_folder_name="split-gradient-max-ShareFalse"

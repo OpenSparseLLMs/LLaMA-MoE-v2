@@ -4,11 +4,12 @@ import inspect
 import math
 import warnings
 from dataclasses import dataclass
-from typing import Any, Dict, List, Optional, Tuple, Union
+from typing import Any, Callable, Dict, List, Optional, Tuple, Union
 
 import scattermoe
 import stk
 import torch
+import torch.distributed as dist
 import torch.nn.functional as F
 import torch.utils.checkpoint
 from megablocks import grouped_gemm_util as gg
@@ -20,13 +21,34 @@ from megablocks.layers.glu import memory_optimized_grouped_glu
 from packaging import version
 from torch import nn
 from torch.nn import BCEWithLogitsLoss, CrossEntropyLoss, MSELoss
+from transformers import (
+    BeamSearchScorer,
+    ConstrainedBeamSearchScorer,
+    DisjunctiveConstraint,
+    LogitsProcessorList,
+    PhrasalConstraint,
+    QuantizedCacheConfig,
+    StoppingCriteriaList,
+)
 from transformers.activations import ACT2FN
+from transformers.cache_utils import Cache, DynamicCache
+from transformers.generation.configuration_utils import GenerationConfig, GenerationMode
+from transformers.generation.utils import (
+    NEED_SETUP_CACHE_CLASSES_MAPPING,
+    QUANT_BACKEND_CLASSES_MAPPING,
+    GenerateOutput,
+)
+from transformers.integrations import is_deepspeed_zero3_enabled
 from transformers.modeling_outputs import ModelOutput, SequenceClassifierOutputWithPast
 from transformers.modeling_utils import PreTrainedModel
 from transformers.utils import is_torch_available, logging
-from transformers.utils.import_utils import is_torch_fx_available
+from transformers.utils.import_utils import (
+    is_hqq_available,
+    is_quanto_available,
+    is_torch_fx_available,
+    is_torchdynamo_compiling,
+)
 
-from smoe.utils.cache_utils import Cache, DynamicCache
 from smoe.utils.modeling_attn_mask_utils import _prepare_4d_causal_attention_mask
 
 from .configuration_mixtral import MixtralConfig
@@ -568,30 +590,36 @@ class MixtralAttention(nn.Module):
 # 🔍 Modified from DynamicCache
 class MoECache(Cache):
     """
-    A cache that grows dynamically as more tokens are generated. This is the default for generative models.
+    Modified from the `DynamicCache`!!!
+    A cache that grows dynamically as more tokens are generated.
+    This cache adds extra support for Attention MoE.
 
     It stores the Key and Value states as a list of tensors, one for each layer. The expected shape for each tensor is
     `[batch_size, num_heads, seq_len, head_dim]`.
     """
 
-    def __init__(self) -> None:
-        self.key_cache: List[torch.Tensor] = []
-        self.value_cache: List[torch.Tensor] = []
-        self.seen_tokens = 0  # Used in `generate` to keep tally of how many tokens the cache has seen
-        # TODO TODO TODO TODO TODO
-        raise NotImplementedError
+    def __init__(self, num_experts: int) -> None:
+        # 🔍 multi-experts support
+        self.num_experts = num_experts
+        self.key_cache: List[Dict[int, torch.Tensor]] = [{} for _ in range(num_experts)]
+        self.value_cache: List[Dict[int, torch.Tensor]] = [{} for _ in range(num_experts)]
+        self._seen_tokens: List[Dict[int, int]] = [{} for _ in range(num_experts)]  # Used in `generate` to keep tally of how many tokens the cache has seen
+        self._seen_tokens_total = 0  # 🔍 the total number of individual tokens that at least one expert has seen, this is for `get_seq_length` globally
 
-    def __getitem__(self, layer_idx: int) -> List[Tuple[torch.Tensor]]:
+        self.attention_mask_cache: List[Dict[int, torch.BoolTensor]] = [{} for _ in range(num_experts)]  # 🔍 this is a new cache for attention mask that records the state of previous tokens
+
+    def __getitem__(self, layer_idx: int, expert_idx: int) -> Tuple[torch.Tensor, torch.Tensor]:
         """
-        Support for backwards-compatible `past_key_value` indexing, e.g. `past_key_value[0][0].shape[2]` to get the
+        Support for backwards-compatible `past_key_value` indexing, e.g. `past_key_value[0][0][0].shape[2]` to get the
         sequence length.
         """
         if layer_idx < len(self):
-            return (self.key_cache[layer_idx], self.value_cache[layer_idx])
+            if expert_idx < self.num_experts:  # 🔍
+                return (self.key_cache[expert_idx][layer_idx], self.value_cache[expert_idx][layer_idx])
+            else:  # 🔍
+                raise KeyError(f"Cache only has {self.num_experts} experts, attempted to access expert with index {expert_idx}")
         else:
-            raise KeyError(
-                f"Cache only has {len(self)} layers, attempted to access layer with index {layer_idx}"
-            )
+            raise KeyError(f"Cache only has {len(self)} layers, attempted to access layer with index {layer_idx}")
 
     def __iter__(self):
         """
@@ -599,20 +627,28 @@ class MoECache(Cache):
         keys and values
         """
         for layer_idx in range(len(self)):
-            yield (self.key_cache[layer_idx], self.value_cache[layer_idx])
+            for expert_idx in range(self.num_experts):  # 🔍
+                if layer_idx in self.key_cache[expert_idx]:
+                    yield (self.key_cache[expert_idx][layer_idx], self.value_cache[expert_idx][layer_idx])
 
     def __len__(self):
         """
         Support for backwards-compatible `past_key_value` length, e.g. `len(past_key_value)`. This value corresponds
         to the number of layers in the model.
         """
-        return len(self.key_cache)
+        all_index_list = [key for i in range(self.num_experts) for key in self.key_cache[i].keys()]
+
+        if len(all_index_list) == 0:
+            return 0
+        else:
+            return max(all_index_list) + 1  # 🔍 the maximum layer index among all experts
 
     def update(
             self,
             key_states: torch.Tensor,
             value_states: torch.Tensor,
             layer_idx: int,
+            expert_idx: int,  # 🔍
             cache_kwargs: Optional[Dict[str, Any]] = None,
     ) -> Tuple[torch.Tensor, torch.Tensor]:
         """
@@ -625,51 +661,72 @@ class MoECache(Cache):
                 The new value states to cache.
             layer_idx (`int`):
                 The index of the layer to cache the states for.
+            expert_idx (`int`):
+                🔍 The index of the expert to cache the states for.
             cache_kwargs (`Dict[str, Any]`, `optional`):
-                Additional arguments for the cache subclass. No additional arguments are used in `DynamicCache`.
+                Additional arguments for the cache subclass. No additional arguments are used in `MoECache`.
 
         Return:
             A tuple containing the updated key and value states.
         """
-        # Update the number of seen tokens
-        if layer_idx == 0:
-            self.seen_tokens += key_states.shape[-2]
+        if layer_idx not in self._seen_tokens[expert_idx]:  # 🔍
+            # Update the number of seen tokens
+            self._seen_tokens[expert_idx][layer_idx] = key_states.shape[-2]
+            # Update the cache
+            self.key_cache[expert_idx][layer_idx] = key_states
+            self.value_cache[expert_idx][layer_idx] = value_states
 
-        # Update the cache
-        if len(self.key_cache) <= layer_idx:
-            self.key_cache.append(key_states)
-            self.value_cache.append(value_states)
-        else:
-            self.key_cache[layer_idx] = torch.cat(
-                [self.key_cache[layer_idx], key_states], dim=-2
-            )
-            self.value_cache[layer_idx] = torch.cat(
-                [self.value_cache[layer_idx], value_states], dim=-2
-            )
+        else:  # 🔍
+            # Update the number of seen tokens
+            self._seen_tokens[expert_idx][layer_idx] += key_states.shape[-2]
+            # Update the cache
+            self.key_cache[expert_idx][layer_idx] = torch.cat([self.key_cache[expert_idx][layer_idx], key_states], dim=-2)
+            self.value_cache[expert_idx][layer_idx] = torch.cat([self.value_cache[expert_idx][layer_idx], value_states], dim=-2)
 
-        return self.key_cache[layer_idx], self.value_cache[layer_idx]
+        return self.key_cache[expert_idx][layer_idx], self.value_cache[expert_idx][layer_idx]
 
-    def get_seq_length(self, layer_idx: Optional[int] = 0) -> int:
-        """Returns the sequence length of the cached states. A layer index can be optionally passed."""
-        if len(self.key_cache) <= layer_idx:
-            return 0
-        return self.key_cache[layer_idx].shape[-2]
+    def add_seen_tokens_total(self, new_token_num: int = 0) -> None:
+        """🔍 Add the number of new tokens to the total number of seen tokens."""
+        # THIS FUNCTION IS EXCLUSIVE FOR `MoECache`!
+        self._seen_tokens_total += new_token_num
+
+    def get_seq_length(self, layer_idx: Optional[int] = None, expert_idx: Optional[int] = None) -> Union[List[List[int]], int]:  # 🔍
+        """Returns the sequence length of the cached states. A layer & expert index can be optionally passed."""
+        if layer_idx is not None and expert_idx is not None:  # 🔍 return the length for specific layer & expert
+            if self.num_experts <= expert_idx or layer_idx not in self.key_cache[expert_idx]:  # 🔍
+                return 0
+            else:
+                return self.key_cache[expert_idx][layer_idx].shape[-2]
+
+        else:  # 🔍 return the total number of individual tokens the cache has seen
+            return self._seen_tokens_total
 
     def get_max_length(self) -> Optional[int]:
-        """Returns the maximum sequence length of the cached states. DynamicCache does not have a maximum length."""
+        """Returns the maximum sequence length of the cached states. MoECache does not have a maximum length."""
         return None
+
+    def get_usable_length(self, new_seq_length: int, layer_idx: Optional[int] = None, expert_idx: Optional[int] = None) -> int:
+        """Given the sequence length of the new inputs, returns the usable length of the cache."""
+        # Cache without size limit -> all cache is usable
+        # Cache with size limit -> if the length cache plus the length of the new inputs is larger the maximum cache
+        #   length, we will need to evict part of the cache (and thus not all cache is usable)
+        max_length = self.get_max_length()
+        previous_seq_length = self.get_seq_length(layer_idx, expert_idx)  # 🔍
+        if max_length is not None and previous_seq_length + new_seq_length > max_length:
+            return max_length - new_seq_length
+        return previous_seq_length
 
     def reorder_cache(self, beam_idx: torch.LongTensor):
         """Reorders the cache for beam search, given the selected beam indices."""
-        for layer_idx in range(len(self.key_cache)):
-            device = self.key_cache[layer_idx].device
-            self.key_cache[layer_idx] = self.key_cache[layer_idx].index_select(
-                0, beam_idx.to(device)
-            )
-            device = self.value_cache[layer_idx].device
-            self.value_cache[layer_idx] = self.value_cache[layer_idx].index_select(
-                0, beam_idx.to(device)
-            )
+        # TODO: support for beam search
+        print("MoECache, reorder_cache", beam_idx)
+        raise NotImplementedError
+
+        # for layer_idx in range(len(self.key_cache)):
+        #     device = self.key_cache[layer_idx].device
+        #     self.key_cache[layer_idx] = self.key_cache[layer_idx].index_select(0, beam_idx.to(device))
+        #     device = self.value_cache[layer_idx].device
+        #     self.value_cache[layer_idx] = self.value_cache[layer_idx].index_select(0, beam_idx.to(device))
 
     def to_legacy_cache(self) -> Tuple[Tuple[torch.Tensor], Tuple[torch.Tensor]]:
         raise NotImplementedError
@@ -677,6 +734,34 @@ class MoECache(Cache):
     @classmethod
     def from_legacy_cache(cls, past_key_values: Optional[Tuple[Tuple[torch.FloatTensor]]] = None) -> "MoECache":
         raise NotImplementedError
+
+    def update_attention_mask(
+            self,
+            new_attention_mask: torch.BoolTensor,
+            layer_idx: int,
+            expert_idx: int,
+    ) -> torch.BoolTensor:
+        """
+        🔍 Updates the attention mask cache with the new `attention_mask`.
+
+        Parameters:
+            new_attention_mask (`torch.Tensor`):
+                The new key states to cache.
+            layer_idx (`int`):
+                The index of the layer to cache the states for.
+            expert_idx (`int`):
+                The index of the expert to cache the states for.
+
+        Return:
+            A tensor containing the updated attention_mask.
+        """
+        # Update the cache
+        if layer_idx not in self.attention_mask_cache[expert_idx]:  # 🔍 no attention mask cached, this is the first stroke
+            self.attention_mask_cache[expert_idx][layer_idx] = new_attention_mask
+        else:  # 🔍 concatenate along the seq_len dim
+            self.attention_mask_cache[expert_idx][layer_idx] = torch.cat([self.attention_mask_cache[expert_idx][layer_idx], new_attention_mask], dim=-1)
+
+        return self.attention_mask_cache[expert_idx][layer_idx]
 
 
 # 🔍 Modified from MixtralAttention
@@ -731,7 +816,7 @@ class MixtralAttentionMoE(MixtralAttention):
             hidden_states: torch.Tensor,
             attention_mask: Optional[torch.Tensor] = None,  # 🔍 This should be the Tensor with shape(bsz, seqlen) that represents the padding mask
             position_ids: Optional[torch.LongTensor] = None,
-            past_key_value: Optional[Cache] = None,
+            past_key_value: Optional[MoECache] = None,
             output_attentions: bool = False,
             use_cache: bool = False,
             **kwargs,
@@ -740,12 +825,14 @@ class MixtralAttentionMoE(MixtralAttention):
             warnings.warn(
                 "Passing `padding_mask` is deprecated and will be removed in v4.37. Please make sure use `attention_mask` instead.`"
             )
+        if past_key_value is not None and not isinstance(past_key_value, MoECache):  # 🔍 type check
+            raise TypeError(
+                "`past_key_value` must be a `MoECache` instance for attention MoE!"
+            )
         device = hidden_states.device
         dtype = hidden_states.dtype
         bsz, q_len, hidden_dim = hidden_states.size()
         hidden_states = hidden_states.reshape(-1, hidden_dim)  # 🔍 flatten the dim
-        if attention_mask is not None:
-            attention_mask = attention_mask.reshape(-1)  # 🔍 flatten the dim
 
         # 🔍 topk gating
         router_logits = self.gate(hidden_states)  # (bsz * q_len, num_key_value_heads)
@@ -764,6 +851,7 @@ class MixtralAttentionMoE(MixtralAttention):
         expert_mask = expert_mask.permute(2, 1, 0)  # (num_key_value_heads, top_k_attn, bsz * q_len)
 
         # Loop over all available experts in the model and perform the computation on each expert
+        all_attn_weights = [] if output_attentions else None
         for expert_idx in range(self.num_key_value_heads):
             # expert_mask[expert_idx]: (top_k_attn, bsz * q_len)
             # idx: the topk position. (selected_num)
@@ -771,6 +859,8 @@ class MixtralAttentionMoE(MixtralAttention):
             idx, top_x = torch.nonzero(expert_mask[expert_idx], as_tuple=True)
 
             if top_x.shape[0] == 0 and not self.training:  # skip during training will lead to asynchrony among different GPUs and blocks the training!
+                if output_attentions:
+                    all_attn_weights.append(None)
                 continue
 
             # 🔍 Comment (DDZ): This is useless and even lags the speed, so I get it removed.
@@ -781,7 +871,7 @@ class MixtralAttentionMoE(MixtralAttention):
             # 🔍 get routing info for this expert
             current_batch_ids = (top_x // q_len)  # batch ids for current_state, (selected_num)
             each_batch_selected_token_num = torch.bincount(current_batch_ids, minlength=bsz)  # (bsz)
-            max_attn_seq_len = each_batch_selected_token_num.max().item()
+            this_q_len = each_batch_selected_token_num.max().item()
 
             # 🔍 get the indices of each token in the hidden_state of this expert
             selection_mask = torch.zeros((bsz * q_len,), device=device, dtype=torch.bool)  # the selection mask for this expert (this helps specify the position to put for each token)
@@ -794,7 +884,7 @@ class MixtralAttentionMoE(MixtralAttention):
             current_seq_ids = token_position_indices[top_x]  # sequence ids for current_state, (selected_num)
 
             # 🔍 initialize hidden_states for this expert
-            current_state = torch.empty((bsz, max_attn_seq_len, hidden_dim), dtype=dtype, device=device)
+            current_state = torch.zeros((bsz, this_q_len, hidden_dim), dtype=dtype, device=device)
             current_state[current_batch_ids, current_seq_ids] = hidden_states[top_x]  # assign tokens sparsely
 
             # Normal Attention Forward
@@ -803,9 +893,9 @@ class MixtralAttentionMoE(MixtralAttention):
             key_states = self.k_proj[expert_idx](current_state)  # 🔍 specify expert
             value_states = self.v_proj[expert_idx](current_state)  # 🔍 specify expert
 
-            query_states = query_states.view(bsz, max_attn_seq_len, self.num_key_value_groups, self.head_dim).transpose(1, 2)  # 🔍 q_len -> max_attn_seq_len, num_heads -> num_key_value_groups
-            key_states = key_states.view(bsz, max_attn_seq_len, 1, self.head_dim).transpose(1, 2)  # 🔍 q_len -> max_attn_seq_len, num_key_value_heads -> 1
-            value_states = value_states.view(bsz, max_attn_seq_len, 1, self.head_dim).transpose(1, 2)  # 🔍 q_len -> max_attn_seq_len, num_key_value_heads -> 1
+            query_states = query_states.view(bsz, this_q_len, self.num_key_value_groups, self.head_dim).transpose(1, 2)  # 🔍 q_len -> this_q_len, num_heads -> num_key_value_groups
+            key_states = key_states.view(bsz, this_q_len, 1, self.head_dim).transpose(1, 2)  # 🔍 q_len -> this_q_len, num_key_value_heads -> 1
+            value_states = value_states.view(bsz, this_q_len, 1, self.head_dim).transpose(1, 2)  # 🔍 q_len -> this_q_len, num_key_value_heads -> 1
 
             past_key_values_length = 0
             kv_seq_len = key_states.shape[-2]
@@ -816,11 +906,11 @@ class MixtralAttentionMoE(MixtralAttention):
                         "for auto-regressive decoding with k/v caching, please make sure to initialize the attention class "
                         "with a layer index."
                     )
-                past_key_values_length = past_key_value.get_usable_length(kv_seq_len, self.layer_idx)  # TODO: add expert-wise support
+                past_key_values_length = past_key_value.get_usable_length(kv_seq_len, self.layer_idx, expert_idx)  # 🔍 specify expert index
                 kv_seq_len += past_key_values_length
 
             # 🔍 create position_ids for selected tokens
-            current_position_ids = torch.zeros((bsz, max_attn_seq_len), device=device, dtype=torch.long)
+            current_position_ids = torch.zeros((bsz, this_q_len), device=device, dtype=torch.long)
             current_position_ids[current_batch_ids, current_seq_ids] = position_ids.expand(bsz, q_len).flatten()[top_x]
 
             if top_x.shape[0] > 0:  # apply only when there are tokens
@@ -829,7 +919,7 @@ class MixtralAttentionMoE(MixtralAttention):
 
             if past_key_value is not None:
                 cache_kwargs = {"sin": sin, "cos": cos}  # Specific to RoPE models
-                key_states, value_states = past_key_value.update(key_states, value_states, self.layer_idx, cache_kwargs)  # TODO: add expert-wise support
+                key_states, value_states = past_key_value.update(key_states, value_states, self.layer_idx, expert_idx, cache_kwargs)  # 🔍 specify expert index
 
             # repeat k/v heads if n_kv_heads < n_heads
             # Note (DDZ): here the dim is expanded internally, rather than concat-repeat. (Disable for Attention MoE)
@@ -838,24 +928,37 @@ class MixtralAttentionMoE(MixtralAttention):
 
             attn_weights = torch.matmul(query_states, key_states.transpose(2, 3)) / math.sqrt(self.head_dim)  # softmax temperature
 
-            if attn_weights.size() != (bsz, self.num_key_value_groups, max_attn_seq_len, kv_seq_len):  # 🔍 q_len -> max_attn_seq_len, num_heads -> num_key_value_groups
-                raise ValueError(f"Attention weights should be of size {(bsz, self.num_key_value_groups, max_attn_seq_len, kv_seq_len)}, but is {attn_weights.size()}")
+            if attn_weights.size() != (bsz, self.num_key_value_groups, this_q_len, kv_seq_len):  # 🔍 q_len -> this_q_len, num_heads -> num_key_value_groups
+                raise ValueError(f"Attention weights should be of size {(bsz, self.num_key_value_groups, this_q_len, kv_seq_len)}, but is {attn_weights.size()}")
 
-            # 🔍 create attention mask with reduced seq_len
+            # 🔍 create `current_attention_mask` with reduced `seq_len`
+            # Notice that the `attention_mask` is passed intact during both training & generation, so we need to adjust the `top_x` by `past_key_values_length`.
+            # However, we don't have the routing information of previous tokens, which makes it impossible to create `current_attention_mask` for previous tokens.
+            # So here we need an extra "attention mask cache" to record the `attention_mask` for previous tokens, and update for new tokens accordingly during generation.
             if attention_mask is not None:
-                current_attention_mask = torch.zeros((bsz, max_attn_seq_len), dtype=attention_mask.dtype, device=device)
-                current_attention_mask[current_batch_ids, current_seq_ids] = attention_mask[top_x]  # assign masks sparsely
+                current_attention_mask = torch.zeros((bsz, this_q_len), dtype=attention_mask.dtype, device=device)
+
+                if past_key_values_length > 0:  # 🔍 we need to exclude previous tokens
+                    previous_seen_tokens_total = past_key_value._seen_tokens_total - q_len
+                    temp_attention_mask = attention_mask[:, previous_seen_tokens_total:].flatten()  # select along dimension 1 so that we get tokens in this iteration
+                else:
+                    temp_attention_mask = attention_mask.flatten()  # flatten the dim
+
+                current_attention_mask[current_batch_ids, current_seq_ids] = temp_attention_mask[top_x]  # assign masks sparsely
+
+                if past_key_value is not None:  # 🔍 we need to update with cached attention mask
+                    current_attention_mask = past_key_value.update_attention_mask(current_attention_mask, self.layer_idx, expert_idx)
 
                 current_attention_mask = _prepare_4d_causal_attention_mask(
                     current_attention_mask,
-                    (bsz, max_attn_seq_len),
+                    (bsz, this_q_len),
                     current_state,
                     past_key_values_length,
                     sliding_window=self.config.sliding_window,
                 )
 
-                if current_attention_mask.size() != (bsz, 1, max_attn_seq_len, kv_seq_len):  # 🔍 q_len -> max_attn_seq_len
-                    raise ValueError(f"Attention mask should be of size {(bsz, 1, max_attn_seq_len, kv_seq_len)}, but is {attention_mask.size()}")
+                if current_attention_mask.size() != (bsz, 1, this_q_len, kv_seq_len):  # 🔍 q_len -> this_q_len
+                    raise ValueError(f"Attention mask should be of size {(bsz, 1, this_q_len, kv_seq_len)}, but is {current_attention_mask.size()}")
 
                 attn_weights = attn_weights + current_attention_mask  # 🔍
 
@@ -864,11 +967,11 @@ class MixtralAttentionMoE(MixtralAttention):
             attn_weights = nn.functional.dropout(attn_weights, p=self.attention_dropout, training=self.training)
             attn_output = torch.matmul(attn_weights, value_states)
 
-            if attn_output.size() != (bsz, self.num_key_value_groups, max_attn_seq_len, self.head_dim):  # 🔍 q_len -> max_attn_seq_len, num_heads -> num_key_value_groups
+            if attn_output.size() != (bsz, self.num_key_value_groups, this_q_len, self.head_dim):  # 🔍 q_len -> this_q_len, num_heads -> num_key_value_groups
                 raise ValueError(f"`attn_output` should be of size {(bsz, self.num_heads, q_len, self.head_dim)}, but is {attn_output.size()}")
 
             attn_output = attn_output.transpose(1, 2).contiguous()
-            attn_output = attn_output.reshape(bsz, max_attn_seq_len, self.num_key_value_groups * self.head_dim)  # 🔍 q_len -> max_attn_seq_len, hidden_size -> num_key_value_groups * head_dim
+            attn_output = attn_output.reshape(bsz, this_q_len, self.num_key_value_groups * self.head_dim)  # 🔍 q_len -> this_q_len, hidden_size -> num_key_value_groups * head_dim
             attn_output = self.o_proj[expert_idx](attn_output)
             # ---------------------------------------------- #
 
@@ -879,13 +982,16 @@ class MixtralAttentionMoE(MixtralAttention):
             # 🔍 add to the final outputs
             final_attn_output.index_add_(0, top_x, attn_output)
 
+            if output_attentions:
+                all_attn_weights.append(attn_weights)
+
         # 🔍 reshape
         final_attn_output = final_attn_output.reshape(bsz, q_len, hidden_dim)
 
-        if not output_attentions:
-            attn_weights = None
+        if output_attentions:
+            all_attn_weights = tuple(all_attn_weights)
 
-        return final_attn_output, attn_weights, past_key_value
+        return final_attn_output, all_attn_weights, past_key_value
 
     @torch.no_grad()
     def from_vanilla_attention(attention: MixtralAttention, top_k_attn, scale_factor_attn):
@@ -943,16 +1049,6 @@ class MixtralFlashAttention2(MixtralAttention):
     # Copied from transformers.models.llama.modeling_llama.LlamaFlashAttention2.__init__
     def __init__(self, *args, **kwargs):
         super().__init__(*args, **kwargs)
-
-        # TODO (tzhu): for q_proj attention MoE, use concatenation instead of sum for the expert outputs
-        # 🔍 Comment (DDZ): I discard this implementation and use a new "AttentionMoE" class for elegance.
-        # import copy
-        # config = copy.deepcopy(self.config)
-        # config.num_experts_per_tok = 8
-        # config.moe_type = "linearlist"
-        # config.num_heads = 8
-        # self.q_proj = MixtralSparseMoeBlock(config)
-
         # TODO: Should be removed once Flash Attention for RoCm is bumped to 2.1.
         # flash_attn<2.1 generates top-left aligned causal mask, while what is needed here is bottom-right alignement, that was made default for flash_attn>=2.1. This attribute is used to handle this difference. Reference: https://github.com/Dao-AILab/flash-attention/releases/tag/v2.1.0.
         # Beware that with flash_attn<2.1, using q_seqlen != k_seqlen (except for the case q_seqlen == 1) produces a wrong mask (top-left).
@@ -1767,8 +1863,15 @@ class MixtralModel(MixtralPreTrainedModel):
         if use_cache:
             use_legacy_cache = not isinstance(past_key_values, Cache)
             if use_legacy_cache:
-                past_key_values = DynamicCache.from_legacy_cache(past_key_values)
+                if self.config.use_attn_moe:  # 🔍
+                    past_key_values = MoECache.from_legacy_cache(past_key_values)
+                else:  # 🔍
+                    past_key_values = DynamicCache.from_legacy_cache(past_key_values)
             past_key_values_length = past_key_values.get_usable_length(seq_length)
+
+            # 🔍 add total seen tokens, this is VERY important for getting correct `past_key_values_length`!
+            if self.config.use_attn_moe:
+                past_key_values.add_seen_tokens_total(seq_length)
 
         if position_ids is None:
             device = input_ids.device if input_ids is not None else inputs_embeds.device
@@ -2040,7 +2143,11 @@ class MixtralForCausalLM(MixtralPreTrainedModel):
     ):
         # Omit tokens covered by past_key_values
         if past_key_values is not None:
-            if isinstance(past_key_values, Cache):
+            if isinstance(past_key_values, MoECache):  # 🔍 for MoECache only
+                cache_length = past_key_values.get_seq_length()
+                past_length = past_key_values._seen_tokens_total  # 🔍
+                max_cache_length = past_key_values.get_max_length()
+            elif isinstance(past_key_values, Cache):
                 cache_length = past_key_values.get_seq_length()
                 past_length = past_key_values.seen_tokens
                 max_cache_length = past_key_values.get_max_length()
@@ -2057,10 +2164,12 @@ class MixtralForCausalLM(MixtralPreTrainedModel):
                 and attention_mask.shape[1] > input_ids.shape[1]
             ):
                 input_ids = input_ids[:, -(attention_mask.shape[1] - past_length) :]
+
             # 2 - If the past_length is smaller than input_ids', then input_ids holds all input tokens. We can discard
             # input_ids based on the past_length.
             elif past_length < input_ids.shape[1]:
                 input_ids = input_ids[:, past_length:]
+
             # 3 - Otherwise (past_length >= input_ids.shape[1]), let's assume input_ids only has unprocessed tokens.
 
             # If we are about to go beyond the maximum cache length, we need to crop the input attention mask.
@@ -2097,15 +2206,633 @@ class MixtralForCausalLM(MixtralPreTrainedModel):
 
     @staticmethod
     def _reorder_cache(past_key_values, beam_idx):
-        reordered_past = ()
-        for layer_past in past_key_values:
-            reordered_past += (
-                tuple(
-                    past_state.index_select(0, beam_idx.to(past_state.device))
-                    for past_state in layer_past
-                ),
+        # TODO: support for beam search
+        print("MixtralForCausalLM, _reorder_cache", beam_idx)
+        raise NotImplementedError
+
+        # reordered_past = ()
+        # for layer_past in past_key_values:
+        #     reordered_past += (
+        #         tuple(
+        #             past_state.index_select(0, beam_idx.to(past_state.device))
+        #             for past_state in layer_past
+        #         ),
+        #     )
+        # return reordered_past
+
+    @torch.no_grad()
+    def generate(
+        self,
+        inputs: Optional[torch.Tensor] = None,
+        generation_config: Optional[GenerationConfig] = None,
+        logits_processor: Optional[LogitsProcessorList] = None,
+        stopping_criteria: Optional[StoppingCriteriaList] = None,
+        prefix_allowed_tokens_fn: Optional[
+            Callable[[int, torch.Tensor], List[int]]
+        ] = None,
+        synced_gpus: Optional[bool] = None,
+        assistant_model: Optional["PreTrainedModel"] = None,
+        streamer: Optional["BaseStreamer"] = None,
+        negative_prompt_ids: Optional[torch.Tensor] = None,
+        negative_prompt_attention_mask: Optional[torch.Tensor] = None,
+        **kwargs,
+    ) -> Union[GenerateOutput, torch.LongTensor]:
+        r"""
+
+        Generates sequences of token ids for models with a language modeling head.
+
+        <Tip warning={true}>
+
+        Most generation-controlling parameters are set in `generation_config` which, if not passed, will be set to the
+        model's default generation configuration. You can override any `generation_config` by passing the corresponding
+        parameters to generate(), e.g. `.generate(inputs, num_beams=4, do_sample=True)`.
+
+        For an overview of generation strategies and code examples, check out the [following
+        guide](../generation_strategies).
+
+        </Tip>
+
+        Parameters:
+            inputs (`torch.Tensor` of varying shape depending on the modality, *optional*):
+                The sequence used as a prompt for the generation or as model inputs to the encoder. If `None` the
+                method initializes it with `bos_token_id` and a batch size of 1. For decoder-only models `inputs`
+                should be in the format of `input_ids`. For encoder-decoder models *inputs* can represent any of
+                `input_ids`, `input_values`, `input_features`, or `pixel_values`.
+            generation_config ([`~generation.GenerationConfig`], *optional*):
+                The generation configuration to be used as base parametrization for the generation call. `**kwargs`
+                passed to generate matching the attributes of `generation_config` will override them. If
+                `generation_config` is not provided, the default will be used, which has the following loading
+                priority: 1) from the `generation_config.json` model file, if it exists; 2) from the model
+                configuration. Please note that unspecified parameters will inherit [`~generation.GenerationConfig`]'s
+                default values, whose documentation should be checked to parameterize generation.
+            logits_processor (`LogitsProcessorList`, *optional*):
+                Custom logits processors that complement the default logits processors built from arguments and
+                generation config. If a logit processor is passed that is already created with the arguments or a
+                generation config an error is thrown. This feature is intended for advanced users.
+            stopping_criteria (`StoppingCriteriaList`, *optional*):
+                Custom stopping criteria that complements the default stopping criteria built from arguments and a
+                generation config. If a stopping criteria is passed that is already created with the arguments or a
+                generation config an error is thrown. If your stopping criteria depends on the `scores` input, make
+                sure you pass `return_dict_in_generate=True, output_scores=True` to `generate`. This feature is
+                intended for advanced users.
+            prefix_allowed_tokens_fn (`Callable[[int, torch.Tensor], List[int]]`, *optional*):
+                If provided, this function constraints the beam search to allowed tokens only at each step. If not
+                provided no constraint is applied. This function takes 2 arguments: the batch ID `batch_id` and
+                `input_ids`. It has to return a list with the allowed tokens for the next generation step conditioned
+                on the batch ID `batch_id` and the previously generated tokens `inputs_ids`. This argument is useful
+                for constrained generation conditioned on the prefix, as described in [Autoregressive Entity
+                Retrieval](https://arxiv.org/abs/2010.00904).
+            synced_gpus (`bool`, *optional*):
+                Whether to continue running the while loop until max_length. Unless overridden this flag will be set to
+                `True` under DeepSpeed ZeRO Stage 3 multiple GPUs environment to avoid hanging if one GPU finished
+                generating before other GPUs. Otherwise it'll be set to `False`.
+            assistant_model (`PreTrainedModel`, *optional*):
+                An assistant model that can be used to accelerate generation. The assistant model must have the exact
+                same tokenizer. The acceleration is achieved when forecasting candidate tokens with the assistent model
+                is much faster than running generation with the model you're calling generate from. As such, the
+                assistant model should be much smaller.
+            streamer (`BaseStreamer`, *optional*):
+                Streamer object that will be used to stream the generated sequences. Generated tokens are passed
+                through `streamer.put(token_ids)` and the streamer is responsible for any further processing.
+            negative_prompt_ids (`torch.LongTensor` of shape `(batch_size, sequence_length)`, *optional*):
+                The negative prompt needed for some processors such as CFG. The batch size must match the input batch
+                size. This is an experimental feature, subject to breaking API changes in future versions.
+            negative_prompt_attention_mask (`torch.LongTensor` of shape `(batch_size, sequence_length)`, *optional*):
+                Attention_mask for `negative_prompt_ids`.
+            kwargs (`Dict[str, Any]`, *optional*):
+                Ad hoc parametrization of `generation_config` and/or additional model-specific kwargs that will be
+                forwarded to the `forward` function of the model. If the model is an encoder-decoder model, encoder
+                specific kwargs should not be prefixed and decoder specific kwargs should be prefixed with *decoder_*.
+
+        Return:
+            [`~utils.ModelOutput`] or `torch.LongTensor`: A [`~utils.ModelOutput`] (if `return_dict_in_generate=True`
+            or when `config.return_dict_in_generate=True`) or a `torch.LongTensor`.
+
+                If the model is *not* an encoder-decoder model (`model.config.is_encoder_decoder=False`), the possible
+                [`~utils.ModelOutput`] types are:
+
+                    - [`~generation.GenerateDecoderOnlyOutput`],
+                    - [`~generation.GenerateBeamDecoderOnlyOutput`]
+
+                If the model is an encoder-decoder model (`model.config.is_encoder_decoder=True`), the possible
+                [`~utils.ModelOutput`] types are:
+
+                    - [`~generation.GenerateEncoderDecoderOutput`],
+                    - [`~generation.GenerateBeamEncoderDecoderOutput`]
+        """
+        # 1. Handle `generation_config` and kwargs that might update it, and validate the `.generate()` call
+        self._validate_model_class()
+        tokenizer = kwargs.pop(
+            "tokenizer", None
+        )  # Pull this out first, we only use it for stopping criteria
+        generation_config, model_kwargs = self._prepare_generation_config(
+            generation_config, **kwargs
+        )
+        self._validate_model_kwargs(model_kwargs.copy())
+        self._validate_assistant(assistant_model)
+
+        # 2. Set generation parameters if not already defined
+        if synced_gpus is None:
+            if is_deepspeed_zero3_enabled() and dist.get_world_size() > 1:
+                synced_gpus = True
+            else:
+                synced_gpus = False
+
+        logits_processor = (
+            logits_processor if logits_processor is not None else LogitsProcessorList()
+        )
+        stopping_criteria = (
+            stopping_criteria
+            if stopping_criteria is not None
+            else StoppingCriteriaList()
+        )
+
+        accepts_attention_mask = "attention_mask" in set(
+            inspect.signature(self.forward).parameters.keys()
+        )
+        requires_attention_mask = "encoder_outputs" not in model_kwargs
+        kwargs_has_attention_mask = model_kwargs.get("attention_mask", None) is not None
+
+        # 3. Define model inputs
+        inputs_tensor, model_input_name, model_kwargs = self._prepare_model_inputs(
+            inputs, generation_config.bos_token_id, model_kwargs
+        )
+        batch_size = inputs_tensor.shape[0]
+
+        device = inputs_tensor.device
+        self._prepare_special_tokens(
+            generation_config, kwargs_has_attention_mask, device=device
+        )
+
+        # decoder-only models must use left-padding for batched generation.
+        if not self.config.is_encoder_decoder and not is_torchdynamo_compiling():
+            # If `input_ids` was given, check if the last id in any sequence is `pad_token_id`
+            # Note: If using, `inputs_embeds` this check does not work, because we want to be more hands-off.
+            if (
+                generation_config.pad_token_id is not None
+                and batch_size > 1
+                and len(inputs_tensor.shape) == 2
+                and torch.sum(inputs_tensor[:, -1] == generation_config.pad_token_id)
+                > 0
+            ):
+                logger.warning(
+                    "A decoder-only architecture is being used, but right-padding was detected! For correct "
+                    "generation results, please set `padding_side='left'` when initializing the tokenizer."
+                )
+
+        # 4. Define other model kwargs
+        # decoder-only models with inputs_embeds forwarding must use caching (otherwise we can't detect whether we are
+        # generating the first new token or not, and we only want to use the embeddings for the first new token)
+        if not self.config.is_encoder_decoder and model_input_name == "inputs_embeds":
+            model_kwargs["use_cache"] = True
+        else:
+            model_kwargs["use_cache"] = generation_config.use_cache
+
+        if (
+            not kwargs_has_attention_mask
+            and requires_attention_mask
+            and accepts_attention_mask
+        ):
+            model_kwargs[
+                "attention_mask"
+            ] = self._prepare_attention_mask_for_generation(
+                inputs_tensor,
+                generation_config.pad_token_id,
+                generation_config.eos_token_id,
             )
-        return reordered_past
+
+        if self.config.is_encoder_decoder and "encoder_outputs" not in model_kwargs:
+            # if model is encoder decoder encoder_outputs are created and added to `model_kwargs`
+            model_kwargs = self._prepare_encoder_decoder_kwargs_for_generation(
+                inputs_tensor, model_kwargs, model_input_name, generation_config
+            )
+
+        # 5. Prepare `input_ids` which will be used for auto-regressive generation
+        if self.config.is_encoder_decoder:
+            input_ids, model_kwargs = self._prepare_decoder_input_ids_for_generation(
+                batch_size=batch_size,
+                model_input_name=model_input_name,
+                model_kwargs=model_kwargs,
+                decoder_start_token_id=generation_config.decoder_start_token_id,
+                device=inputs_tensor.device,
+            )
+        else:
+            input_ids = (
+                inputs_tensor
+                if model_input_name == "input_ids"
+                else model_kwargs.pop("input_ids")
+            )
+
+        if generation_config.token_healing:
+            input_ids = self.heal_tokens(input_ids, tokenizer)
+
+        if streamer is not None:
+            streamer.put(input_ids.cpu())
+
+        # 6. Prepare `max_length` depending on other stopping criteria.
+        input_ids_length = input_ids.shape[-1]
+        has_default_max_length = (
+            kwargs.get("max_length") is None
+            and generation_config.max_length is not None
+        )
+        has_default_min_length = (
+            kwargs.get("min_length") is None
+            and generation_config.min_length is not None
+        )
+        generation_config = self._prepare_generated_length(
+            generation_config=generation_config,
+            has_default_max_length=has_default_max_length,
+            has_default_min_length=has_default_min_length,
+            model_input_name=model_input_name,
+            inputs_tensor=inputs_tensor,
+            input_ids_length=input_ids_length,
+        )
+
+        use_dynamic_cache_by_default = False
+        if (
+            generation_config.cache_implementation is not None
+            and model_kwargs.get("past_key_values") is not None
+        ):
+            raise ValueError(
+                "Passing both `cache_implementation` (used to initialize certain caches) and `past_key_values` (a "
+                "Cache object) is unsupported. Please use only one of the two."
+            )
+        elif generation_config.cache_implementation is not None:
+            if self.config.use_attn_moe:  # 🔍
+                raise ValueError(
+                    "Attention MoE doesn't support specifying the cache type! You can only use `MoECache`"
+                )
+            if (
+                generation_config.cache_implementation
+                in NEED_SETUP_CACHE_CLASSES_MAPPING
+            ):
+                if (
+                    generation_config.cache_implementation == "static"
+                    and not self._supports_static_cache
+                ):
+                    raise ValueError(
+                        "This model does not support `cache_implementation='static'`. Please check the following "
+                        "issue: https://github.com/huggingface/transformers/issues/28981"
+                    )
+                model_kwargs["past_key_values"] = self._get_cache(
+                    generation_config.cache_implementation,
+                    getattr(generation_config, "num_beams", 1) * batch_size,
+                    generation_config.max_length,
+                )
+            elif generation_config.cache_implementation == "quantized":
+                if not self._supports_quantized_cache:
+                    raise ValueError(
+                        "This model does not support the quantized cache. If you want your model to support quantized "
+                        "cache, please open an issue."
+                    )
+
+                cache_config = (
+                    generation_config.cache_config
+                    if generation_config.cache_config is not None
+                    else QuantizedCacheConfig()
+                )
+                cache_class = QUANT_BACKEND_CLASSES_MAPPING[cache_config.backend]
+
+                if cache_config.backend == "quanto" and not is_quanto_available():
+                    raise ImportError(
+                        "You need to install `quanto` in order to use KV cache quantization with quanto backend. "
+                        "Please install it via  with `pip install quanto`"
+                    )
+                elif cache_config.backend == "HQQ" and not is_hqq_available():
+                    raise ImportError(
+                        "You need to install `HQQ` in order to use KV cache quantization with HQQ backend. "
+                        "Please install it via  with `pip install hqq`"
+                    )
+
+                model_kwargs["past_key_values"] = cache_class(cache_config)
+        # Use DynamicCache() instance by default. This will avoid back and forth from legacy format that
+        # keeps copying the cache thus using much more memory
+        elif (
+            generation_config.cache_implementation is None
+            and self._supports_default_dynamic_cache()
+        ):
+            past = model_kwargs.get("past_key_values", None)
+            if past is None:
+                if self.config.use_attn_moe:  # 🔍
+                    model_kwargs["past_key_values"] = MoECache(
+                        self.config.num_key_value_heads
+                    )
+                else:  # 🔍
+                    model_kwargs["past_key_values"] = DynamicCache()
+                use_dynamic_cache_by_default = True
+            elif isinstance(past, tuple):
+                if self.config.use_attn_moe:  # 🔍
+                    model_kwargs["past_key_values"] = MoECache.from_legacy_cache(past)
+                else:  # 🔍
+                    model_kwargs["past_key_values"] = DynamicCache.from_legacy_cache(
+                        past
+                    )
+                use_dynamic_cache_by_default = True
+
+        self._validate_generated_length(
+            generation_config, input_ids_length, has_default_max_length
+        )
+
+        # 7. determine generation mode
+        generation_mode = generation_config.get_generation_mode(assistant_model)
+
+        if streamer is not None and (generation_config.num_beams > 1):
+            raise ValueError(
+                "`streamer` cannot be used with beam search (yet!). Make sure that `num_beams` is set to 1."
+            )
+
+        if self.device.type != input_ids.device.type:
+            warnings.warn(
+                "You are calling .generate() with the `input_ids` being on a device type different"
+                f" than your model's device. `input_ids` is on {input_ids.device.type}, whereas the model"
+                f" is on {self.device.type}. You may experience unexpected behaviors or slower generation."
+                " Please make sure that you have put `input_ids` to the"
+                f" correct device by calling for example input_ids = input_ids.to('{self.device.type}') before"
+                " running `.generate()`.",
+                UserWarning,
+            )
+
+        # 8. prepare distribution pre_processing samplers
+        prepared_logits_processor = self._get_logits_processor(
+            generation_config=generation_config,
+            input_ids_seq_length=input_ids_length,
+            encoder_input_ids=inputs_tensor,
+            prefix_allowed_tokens_fn=prefix_allowed_tokens_fn,
+            logits_processor=logits_processor,
+            device=inputs_tensor.device,
+            model_kwargs=model_kwargs,
+            negative_prompt_ids=negative_prompt_ids,
+            negative_prompt_attention_mask=negative_prompt_attention_mask,
+        )
+
+        # 9. prepare stopping criteria
+        prepared_stopping_criteria = self._get_stopping_criteria(
+            generation_config=generation_config,
+            stopping_criteria=stopping_criteria,
+            tokenizer=tokenizer,
+            **kwargs,
+        )
+
+        # 10. go into different generation modes
+        if generation_mode == GenerationMode.ASSISTED_GENERATION:
+            if generation_config.num_return_sequences > 1:
+                raise ValueError(
+                    "num_return_sequences has to be 1 when doing assisted generate, "
+                    f"but is {generation_config.num_return_sequences}."
+                )
+            if batch_size > 1:
+                raise ValueError(
+                    "assisted generate is only supported for batch_size = 1"
+                )
+            if not model_kwargs["use_cache"]:
+                raise ValueError("assisted generate requires `use_cache=True`")
+            if generation_config.cache_implementation == "static":
+                raise ValueError(
+                    "assisted generate is not supported with `static_cache`"
+                )
+            if self._is_stateful:
+                # In assisted generation we need the ability to confirm whether the model would pick certain tokens,
+                # which is not possible with stateful models (they can't reset to a previous subset of generated text)
+                raise ValueError(
+                    f"assisted generation is not supported with stateful models, such as {self.__class__.__name__}"
+                )
+
+            # 11. Get the candidate generator, given the parameterization
+            candidate_generator = self._get_candidate_generator(
+                generation_config=generation_config,
+                input_ids=input_ids,
+                inputs_tensor=inputs_tensor,
+                assistant_model=assistant_model,
+                logits_processor=logits_processor,
+                model_kwargs=model_kwargs,
+            )
+
+            # 12. prepare logits warper (if `do_sample` is `True`)
+            prepared_logits_warper = (
+                self._get_logits_warper(
+                    generation_config,
+                    device=input_ids.device,
+                )
+                if generation_config.do_sample
+                else None
+            )
+
+            # 13. run assisted generate
+            result = self._assisted_decoding(
+                input_ids,
+                candidate_generator=candidate_generator,
+                logits_processor=prepared_logits_processor,
+                logits_warper=prepared_logits_warper,
+                stopping_criteria=prepared_stopping_criteria,
+                generation_config=generation_config,
+                synced_gpus=synced_gpus,
+                streamer=streamer,
+                **model_kwargs,
+            )
+
+        elif generation_mode == GenerationMode.CONTRASTIVE_SEARCH:
+            if not model_kwargs["use_cache"]:
+                raise ValueError("Contrastive search requires `use_cache=True`")
+            if self._is_stateful:
+                # Just like assisted generation, we need to be able to rollback to a previous state (see comment above)
+                raise ValueError(
+                    f"contrastive search is not supported with stateful models, such as {self.__class__.__name__}"
+                )
+
+            result = self._contrastive_search(
+                input_ids,
+                logits_processor=prepared_logits_processor,
+                stopping_criteria=prepared_stopping_criteria,
+                generation_config=generation_config,
+                synced_gpus=synced_gpus,
+                streamer=streamer,
+                **model_kwargs,
+            )
+
+        elif generation_mode in (GenerationMode.SAMPLE, GenerationMode.GREEDY_SEARCH):
+            # 11. prepare logits warper
+            prepared_logits_warper = (
+                self._get_logits_warper(generation_config, device=input_ids.device)
+                if generation_config.do_sample
+                else None
+            )
+
+            # 12. expand input_ids with `num_return_sequences` additional sequences per batch
+            input_ids, model_kwargs = self._expand_inputs_for_generation(
+                input_ids=input_ids,
+                expand_size=generation_config.num_return_sequences,
+                is_encoder_decoder=self.config.is_encoder_decoder,
+                **model_kwargs,
+            )
+
+            # 13. run sample (it degenerates to greedy search when `generation_config.do_sample=False`)
+            result = self._sample(
+                input_ids,
+                logits_processor=prepared_logits_processor,
+                logits_warper=prepared_logits_warper,
+                stopping_criteria=prepared_stopping_criteria,
+                generation_config=generation_config,
+                synced_gpus=synced_gpus,
+                streamer=streamer,
+                **model_kwargs,
+            )
+
+        elif generation_mode in (
+            GenerationMode.BEAM_SAMPLE,
+            GenerationMode.BEAM_SEARCH,
+        ):
+            # 11. prepare logits warper
+            prepared_logits_warper = (
+                self._get_logits_warper(generation_config, device=input_ids.device)
+                if generation_config.do_sample
+                else None
+            )
+
+            # 12. prepare beam search scorer
+            beam_scorer = BeamSearchScorer(
+                batch_size=batch_size,
+                num_beams=generation_config.num_beams,
+                device=inputs_tensor.device,
+                length_penalty=generation_config.length_penalty,
+                do_early_stopping=generation_config.early_stopping,
+                num_beam_hyps_to_keep=generation_config.num_return_sequences,
+                max_length=generation_config.max_length,
+            )
+
+            # 13. interleave input_ids with `num_beams` additional sequences per batch
+            input_ids, model_kwargs = self._expand_inputs_for_generation(
+                input_ids=input_ids,
+                expand_size=generation_config.num_beams,
+                is_encoder_decoder=self.config.is_encoder_decoder,
+                **model_kwargs,
+            )
+
+            # 14. run beam sample
+            result = self._beam_search(
+                input_ids,
+                beam_scorer,
+                logits_processor=prepared_logits_processor,
+                logits_warper=prepared_logits_warper,
+                stopping_criteria=prepared_stopping_criteria,
+                generation_config=generation_config,
+                synced_gpus=synced_gpus,
+                **model_kwargs,
+            )
+
+        elif generation_mode == GenerationMode.GROUP_BEAM_SEARCH:
+            # 11. prepare beam search scorer
+            beam_scorer = BeamSearchScorer(
+                batch_size=batch_size,
+                num_beams=generation_config.num_beams,
+                device=inputs_tensor.device,
+                length_penalty=generation_config.length_penalty,
+                do_early_stopping=generation_config.early_stopping,
+                num_beam_hyps_to_keep=generation_config.num_return_sequences,
+                num_beam_groups=generation_config.num_beam_groups,
+                max_length=generation_config.max_length,
+            )
+            # 12. interleave input_ids with `num_beams` additional sequences per batch
+            input_ids, model_kwargs = self._expand_inputs_for_generation(
+                input_ids=input_ids,
+                expand_size=generation_config.num_beams,
+                is_encoder_decoder=self.config.is_encoder_decoder,
+                **model_kwargs,
+            )
+            # 13. run beam search
+            result = self._group_beam_search(
+                input_ids,
+                beam_scorer,
+                logits_processor=prepared_logits_processor,
+                stopping_criteria=prepared_stopping_criteria,
+                generation_config=generation_config,
+                synced_gpus=synced_gpus,
+                **model_kwargs,
+            )
+
+        elif generation_mode == GenerationMode.CONSTRAINED_BEAM_SEARCH:
+            final_constraints = []
+            if generation_config.constraints is not None:
+                final_constraints = generation_config.constraints
+
+            if generation_config.force_words_ids is not None:
+
+                def typeerror():
+                    raise ValueError(
+                        "`force_words_ids` has to either be a `List[List[List[int]]]` or `List[List[int]]` "
+                        f"of positive integers, but is {generation_config.force_words_ids}."
+                    )
+
+                if (
+                    not isinstance(generation_config.force_words_ids, list)
+                    or len(generation_config.force_words_ids) == 0
+                ):
+                    typeerror()
+
+                for word_ids in generation_config.force_words_ids:
+                    if isinstance(word_ids[0], list):
+                        if not isinstance(word_ids, list) or len(word_ids) == 0:
+                            typeerror()
+                        if any(
+                            not isinstance(token_ids, list) for token_ids in word_ids
+                        ):
+                            typeerror()
+                        if any(
+                            any(
+                                (not isinstance(token_id, int) or token_id < 0)
+                                for token_id in token_ids
+                            )
+                            for token_ids in word_ids
+                        ):
+                            typeerror()
+
+                        constraint = DisjunctiveConstraint(word_ids)
+                    else:
+                        if not isinstance(word_ids, list) or len(word_ids) == 0:
+                            typeerror()
+                        if any(
+                            (not isinstance(token_id, int) or token_id < 0)
+                            for token_id in word_ids
+                        ):
+                            typeerror()
+
+                        constraint = PhrasalConstraint(word_ids)
+                    final_constraints.append(constraint)
+
+            # 11. prepare beam search scorer
+            constrained_beam_scorer = ConstrainedBeamSearchScorer(
+                constraints=final_constraints,
+                batch_size=batch_size,
+                num_beams=generation_config.num_beams,
+                device=inputs_tensor.device,
+                length_penalty=generation_config.length_penalty,
+                do_early_stopping=generation_config.early_stopping,
+                num_beam_hyps_to_keep=generation_config.num_return_sequences,
+                max_length=generation_config.max_length,
+            )
+            # 12. interleave input_ids with `num_beams` additional sequences per batch
+            input_ids, model_kwargs = self._expand_inputs_for_generation(
+                input_ids=input_ids,
+                expand_size=generation_config.num_beams,
+                is_encoder_decoder=self.config.is_encoder_decoder,
+                **model_kwargs,
+            )
+            # 13. run beam search
+            result = self._constrained_beam_search(
+                input_ids,
+                constrained_beam_scorer=constrained_beam_scorer,
+                logits_processor=prepared_logits_processor,
+                stopping_criteria=prepared_stopping_criteria,
+                generation_config=generation_config,
+                synced_gpus=synced_gpus,
+                **model_kwargs,
+            )
+
+        # Convert to legacy cache if needed
+        if use_dynamic_cache_by_default and generation_config.return_legacy_cache:
+            if isinstance(result, ModelOutput) and hasattr(result, "past_key_values"):
+                if isinstance(result.past_key_values, DynamicCache):
+                    result.past_key_values = result.past_key_values.to_legacy_cache()
+        return result
 
 
 # Copied from transformers.models.llama.modeling_llama.LlamaForSequenceClassification with Llama->Mixtral, LLAMA->MIXTRAL
