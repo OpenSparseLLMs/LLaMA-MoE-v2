@@ -228,6 +228,7 @@ class MoeModelOutputWithPast(ModelOutput):
     hidden_states: Optional[Tuple[torch.FloatTensor]] = None
     attentions: Optional[Tuple[torch.FloatTensor]] = None
     router_logits: Optional[Tuple[torch.FloatTensor]] = None
+    attn_router_logits: Optional[Tuple[torch.FloatTensor]] = None  # 🔍
 
 
 if is_flash_attn_2_available():
@@ -248,8 +249,11 @@ if is_torch_fx_available():
 
 
 def load_balancing_loss_func(
-    gate_logits: torch.Tensor, num_experts: torch.Tensor = None, top_k=2
-) -> float:
+    gate_logits: Union[torch.Tensor, Tuple],
+    num_experts: torch.Tensor = None,
+    top_k=2,
+    use_layer_wise_balance=False,
+) -> torch.FloatTensor:
     r"""
     Computes auxiliary load balancing loss as in Switch Transformer - implemented in Pytorch.
 
@@ -269,36 +273,48 @@ def load_balancing_loss_func(
     if gate_logits is None:
         return 0
 
-    if isinstance(gate_logits, tuple):
-        # cat along the layers?
-        compute_device = gate_logits[0].device
-        gate_logits = torch.cat(
-            [gate.to(compute_device) for gate in gate_logits], dim=0
-        )
+    # ✨ Here is the fix for balance loss in Mixtral.
+    # We should calculate the balance loss in a layer-wise manner otherwise it may lead to degenerated solutions.
+    if use_layer_wise_balance:
+        if not isinstance(gate_logits, tuple):
+            gate_logits = (gate_logits,)
+    else:
+        if isinstance(gate_logits, tuple):
+            gate_logits = (torch.cat(gate_logits, dim=0),)
 
-    routing_weights, selected_experts = torch.topk(gate_logits, top_k, dim=-1)
-    routing_weights = routing_weights.softmax(dim=-1)
+    all_balance_losses = []
 
-    # cast the expert indices to int64, otherwise one-hot encoding will fail
-    if selected_experts.dtype != torch.int64:
-        selected_experts = selected_experts.to(torch.int64)
+    for logits in gate_logits:
+        routing_weights, selected_experts = torch.topk(logits, top_k, dim=-1)
+        routing_weights = routing_weights.softmax(dim=-1)
 
-    if len(selected_experts.shape) == 2:
-        selected_experts = selected_experts.unsqueeze(2)
+        # cast the expert indices to int64, otherwise one-hot encoding will fail
+        if selected_experts.dtype != torch.int64:
+            selected_experts = selected_experts.to(torch.int64)
 
-    expert_mask = torch.nn.functional.one_hot(selected_experts, num_experts)
+        if len(selected_experts.shape) == 2:
+            selected_experts = selected_experts.unsqueeze(2)
 
-    # For a given token, determine if it was routed to a given expert.
-    expert_mask = torch.max(expert_mask, axis=-2).values
+        expert_mask = torch.nn.functional.one_hot(selected_experts, num_experts)
 
-    # cast to float32 otherwise mean will fail
-    expert_mask = expert_mask.to(torch.float32)
-    tokens_per_group_and_expert = torch.mean(expert_mask, axis=-2)
+        # For a given token, determine if it was routed to a given expert.
+        expert_mask = torch.max(expert_mask, axis=-2).values
 
-    router_prob_per_group_and_expert = torch.mean(routing_weights, axis=-1)
-    return torch.mean(
-        tokens_per_group_and_expert * router_prob_per_group_and_expert.unsqueeze(-1)
-    ) * (num_experts**2)
+        # cast to float32 otherwise mean will fail
+        expert_mask = expert_mask.to(torch.float32)
+        tokens_per_group_and_expert = torch.mean(expert_mask, axis=-2)
+
+        router_prob_per_group_and_expert = torch.mean(routing_weights, axis=-1)
+
+        # ✨ balance loss for this layer
+        balance_loss = torch.mean(
+            tokens_per_group_and_expert * router_prob_per_group_and_expert.unsqueeze(-1)
+        ) * (num_experts**2)
+        all_balance_losses.append(balance_loss)
+
+    all_balance_losses = torch.cat(all_balance_losses).mean()  # ✨
+
+    return all_balance_losses
 
 
 # Copied from transformers.models.llama.modeling_llama._get_unpad_data
@@ -991,7 +1007,7 @@ class MixtralAttentionMoE(MixtralAttention):
         if output_attentions:
             all_attn_weights = tuple(all_attn_weights)
 
-        return final_attn_output, all_attn_weights, past_key_value
+        return final_attn_output, all_attn_weights, past_key_value, router_logits  # 🔍 return an extra `router_logits`
 
     @torch.no_grad()
     def from_vanilla_attention(attention: MixtralAttention, top_k_attn, scale_factor_attn):
@@ -1658,6 +1674,7 @@ class MixtralDecoderLayer(nn.Module):
         self.hidden_size = config.hidden_size
 
         # 🔍
+        self.use_attn_moe = config.use_attn_moe
         if config.use_attn_moe:
             self.self_attn = MISTRAL_ATTENTION_MOE_CLASSES[config._attn_implementation](
                 config, layer_idx
@@ -1713,15 +1730,32 @@ class MixtralDecoderLayer(nn.Module):
 
         hidden_states = self.input_layernorm(hidden_states)
 
-        # Self Attention
-        hidden_states, self_attn_weights, present_key_value = self.self_attn(
-            hidden_states=hidden_states,
-            attention_mask=attention_mask,
-            position_ids=position_ids,
-            past_key_value=past_key_value,
-            output_attentions=output_attentions,
-            use_cache=use_cache,
-        )
+        # 🔍 Self Attention
+        if self.config.use_attn_moe:
+            (
+                hidden_states,
+                self_attn_weights,
+                present_key_value,
+                attn_router_logits,
+            ) = self.self_attn(
+                hidden_states=hidden_states,
+                attention_mask=attention_mask,
+                position_ids=position_ids,
+                past_key_value=past_key_value,
+                output_attentions=output_attentions,
+                use_cache=use_cache,
+            )
+        else:
+            hidden_states, self_attn_weights, present_key_value = self.self_attn(
+                hidden_states=hidden_states,
+                attention_mask=attention_mask,
+                position_ids=position_ids,
+                past_key_value=past_key_value,
+                output_attentions=output_attentions,
+                use_cache=use_cache,
+            )
+            attn_router_logits = None
+
         hidden_states = residual + hidden_states
 
         # Fully Connected
@@ -1739,7 +1773,7 @@ class MixtralDecoderLayer(nn.Module):
             outputs += (present_key_value,)
 
         if output_router_logits:
-            outputs += (router_logits,)
+            outputs += (router_logits, attn_router_logits)  # 🔍
 
         return outputs
 
@@ -1922,6 +1956,7 @@ class MixtralModel(MixtralPreTrainedModel):
         all_hidden_states = () if output_hidden_states else None
         all_self_attns = () if output_attentions else None
         all_router_logits = () if output_router_logits else None
+        all_attn_router_logits = () if output_router_logits else None  # 🔍
         next_decoder_cache = None
 
         for decoder_layer in self.layers:
@@ -1968,7 +2003,8 @@ class MixtralModel(MixtralPreTrainedModel):
                 all_self_attns += (layer_outputs[1],)
 
             if output_router_logits:
-                all_router_logits += (layer_outputs[-1],)
+                all_router_logits += (layer_outputs[-2],)
+                all_attn_router_logits += (layer_outputs[-1],)
 
         hidden_states = self.norm(hidden_states)
 
@@ -2002,6 +2038,7 @@ class MixtralModel(MixtralPreTrainedModel):
             hidden_states=all_hidden_states,
             attentions=all_self_attns,
             router_logits=all_router_logits,
+            attn_router_logits=all_attn_router_logits,  # 🔍
         )
 
 
@@ -2077,7 +2114,7 @@ class MixtralForCausalLM(MixtralPreTrainedModel):
         )
 
         # decoder outputs consists of (dec_features, layer_state, dec_hidden, dec_attn)
-        outputs = self.model(
+        outputs: MoeModelOutputWithPast = self.model(
             input_ids=input_ids,
             attention_mask=attention_mask,
             position_ids=position_ids,
@@ -2110,12 +2147,34 @@ class MixtralForCausalLM(MixtralPreTrainedModel):
         aux_loss = None
         if output_router_logits:
             aux_loss = load_balancing_loss_func(
-                outputs.router_logits if return_dict else outputs[-1],
+                outputs.router_logits if return_dict else outputs[-2],
                 self.num_experts,
                 self.num_experts_per_tok,
+                use_layer_wise_balance=self.config.use_layer_wise_balance,  # ✨
             )
             if labels is not None:
                 loss += self.router_aux_loss_coef * aux_loss
+
+            # 🔍 for Attention MoE
+            #################################
+            valid_attn_router_logits = tuple(
+                logits
+                for logits in (
+                    outputs.attn_router_logits if return_dict else outputs[-1]
+                )
+                if logits is not None
+            )
+
+            if len(valid_attn_router_logits) > 0:  # exist logits that is not None
+                attn_aux_loss = load_balancing_loss_func(
+                    valid_attn_router_logits,
+                    self.config.num_key_value_heads,
+                    self.config.top_k_attn,
+                    use_layer_wise_balance=self.config.use_layer_wise_balance,  # ✨
+                )
+                if labels is not None:
+                    loss += self.router_aux_loss_coef * attn_aux_loss
+            #################################
 
         if not return_dict:
             output = (logits,) + outputs[1:]
