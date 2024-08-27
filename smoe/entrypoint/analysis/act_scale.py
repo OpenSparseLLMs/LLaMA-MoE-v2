@@ -18,6 +18,7 @@ from smoe.utils.visualization.visualize import visualize_expert_load_heatmap
 @torch.no_grad()
 def main():
     bsz = 8
+    name = "test"
 
     ModelClass = LlamaForCausalLM
     model_dir = "/mnt/petrelfs/share_data/quxiaoye/models/llama2_7B/"

@@ -15,6 +15,8 @@ from smoe.models.mixtral_residual.modeling_mixtral_residual import (
     MixtralResidualModel,
 )
 
+# fmt: off
+
 # 🔍
 AutoConfig.register("mixtral", MixtralConfig, exist_ok=True)
 AutoConfig.register("mixtral_residual", MixtralResidualConfig, exist_ok=True)
@@ -23,12 +25,9 @@ AutoModel.register(MixtralConfig, MixtralModel, exist_ok=True)
 AutoModel.register(MixtralResidualConfig, MixtralResidualModel, exist_ok=True)
 
 AutoModelForCausalLM.register(MixtralConfig, MixtralForCausalLM, exist_ok=True)
-AutoModelForCausalLM.register(
-    MixtralResidualConfig, MixtralResidualForCausalLM, exist_ok=True
-)
+AutoModelForCausalLM.register(MixtralResidualConfig, MixtralResidualForCausalLM, exist_ok=True)
 
 if __name__ == "__main__":
-    # fmt: off
     parser = argparse.ArgumentParser()
     parser.add_argument('--model_path', type=str)
     parser.add_argument('--save_path', type=str)
@@ -82,4 +81,5 @@ if __name__ == "__main__":
         warnings.warn(f"[WARN] unknown model type {type(model)}")
 
     print("Done!")
-    # fmt: on
+
+# fmt: on

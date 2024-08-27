@@ -72,4 +72,5 @@ if __name__ == "__main__":
     create_dir(args.save_path)
     torch.save(neuron_indices, os.path.join(args.save_path, "neuron_indices.pt"))
     print("Done.")
-    # fmt: on
+
+# fmt: on
