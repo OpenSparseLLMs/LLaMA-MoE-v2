@@ -3,45 +3,22 @@ Modified from smoe/entrypoint/cpt/cpt_fpt.py
 """
 import gc
 import logging
-import math
 import os
-import pathlib
-import socket
-import sys
 from dataclasses import dataclass, field
 from typing import Optional
 
 import accelerate
-import datasets
 import torch
-import transformers
-from k_means_constrained import KMeansConstrained
-from torch.utils.data import DataLoader, RandomSampler
 from tqdm import tqdm
-from transformers import (
-    CONFIG_MAPPING,
-    AutoConfig,
-    AutoModelForCausalLM,
-    AutoTokenizer,
-    DynamicCache,
-    LlamaForCausalLM,
-    set_seed,
-)
+from transformers import DynamicCache, LlamaForCausalLM
 from transformers.models.llama.modeling_llama import LlamaMLP
-from transformers.trainer_utils import seed_worker
 
-from smoe.data.collate_fn import fault_tolerance_data_collator
-from smoe.entrypoint.cpt.cpt_fpt import MODEL_MAP
-from smoe.entrypoint.expert_construction_v2.get_gates.hidden_feature_clustering import prepare_model_and_data
-from smoe.entrypoint.sft.train_sft_llama3 import CachedJsonlDataset
-from smoe.models.llama_moe.modeling_llama_moe import LlamaMoEForCausalLM
-from smoe.models.llama_moe_residual import LlamaMoEResidualForCausalLM
-from smoe.models.mixtral.modeling_mixtral import MixtralForCausalLM
+from smoe.entrypoint.expert_construction_v2.get_gates.hidden_feature_clustering import (
+    prepare_model_and_data,
+)
 from smoe.utils.config import EnhancedTrainingArguments, ModelArguments, parse_args
-from smoe.utils.expert_construction.k_means_constrained_cos import KMeansConstrainedCos
 from smoe.utils.gpu_mem_track import print_gpu_memory
 from smoe.utils.io import create_dir
-from smoe.utils.param import get_trainable_parameters
 
 logger = logging.getLogger(__name__)
 
@@ -181,7 +158,7 @@ def main():
             all_selection_hidden_states = torch.cat(all_selection_hidden_states, dim=0)
             if accelerator.num_processes > 1:
                 # pad to make the tensors share the same shape
-                pass
+                raise NotImplementedError("Please use 1 GPU to run.")
             all_selection_hidden_states = accelerator.gather(all_selection_hidden_states).cpu().float().reshape(-1, hidden_size)
 
             ## free memory

@@ -137,7 +137,7 @@ class MixtralResidualConfig(PretrainedConfig):
     >>> configuration = model.config
     ```"""
 
-    model_type = "mixtral_residual"   # 🔍
+    model_type = "mixtral_residual"  # 🔍
     keys_to_ignore_at_inference = ["past_key_values"]
 
     def __init__(
@@ -167,6 +167,10 @@ class MixtralResidualConfig(PretrainedConfig):
         router_aux_loss_coef=0.001,
         act_rescale=True,
         moe_type: str = "modulelist",
+        use_attn_moe: bool = False,  # 🔍
+        top_k_attn: int = 7,  # 🔍
+        scale_factor_attn: float = None,  # 🔍
+        use_layer_wise_balance: bool = False,  # ✨ whether to fix the balance loss bug for Mixtral
         **kwargs,
     ):
         self.vocab_size = vocab_size
@@ -202,6 +206,17 @@ class MixtralResidualConfig(PretrainedConfig):
         self.scale_factor = kwargs.pop(
             "scale_factor", self.num_local_experts / self.num_experts_per_tok
         )
+
+        # 🔍 for Attention MoE
+        self.use_attn_moe = use_attn_moe
+        self.top_k_attn = top_k_attn
+        self.scale_factor_attn = (
+            scale_factor_attn if scale_factor_attn is not None else num_key_value_heads
+        )
+
+        # ✨ For balance loss bugfix
+        self.use_layer_wise_balance = use_layer_wise_balance
+
         # Attention implementation to use, if relevant.
         self._attn_implementation_internal = kwargs.pop("attn_implementation", None)
 

@@ -1,3 +1,5 @@
+import math
+import os.path
 import re
 import shutil
 from collections import defaultdict
@@ -6,6 +8,7 @@ from pathlib import Path
 import torch
 from safetensors import safe_open
 from safetensors.torch import save_file
+from torch.nn import init
 from transformers.modeling_utils import dtype_byte_size
 
 from smoe.models.mixtral.configuration_mixtral import MixtralConfig
@@ -57,33 +60,34 @@ def convert_safetensors(
     raw_total_size = -1
     tensor_filepaths = []
     for filepath in model_folder.glob("*"):
-        if is_safetensors_file(filepath):
-            tensor_filepaths.append(filepath)
-        if filepath.name == "config.json":
-            config = MixtralConfig.from_pretrained(filepath)
-            config.num_experts_per_tok = top_k
-            config.num_local_experts = num_experts
-            config.router_aux_loss_coef = 1e-2
-            config.act_rescale = True
-            config.moe_type = moe_type
-            config.intermediate_size = config.intermediate_size // num_experts
-            config.auto_map = {
-                "AutoConfig": "configuration_mixtral.MixtralConfig",
-                "AutoModel": "modeling_mixtral.MixtralModel",
-                "AutoModelForCausalLM": "modeling_mixtral.MixtralForCausalLM",
-            }
-            config.save_pretrained(dump_folder)
-            for filename in [
-                "configuration_mixtral.py",
-                "modeling_mixtral.py",
-            ]:
-                shutil.copy2(f"smoe/models/mixtral/{filename}", dump_folder / filename)
-            (dump_folder / "__init__.py").touch()
-        elif filepath.name == "model.safetensors.index.json":
-            raw_total_size = load_json(filepath)["metadata"]["total_size"]
-        else:
-            # cp to dump_dir
-            shutil.copy2(filepath, dump_folder / filepath.name)
+        if not os.path.isdir(filepath):
+            if is_safetensors_file(filepath):
+                tensor_filepaths.append(filepath)
+            if filepath.name == "config.json":
+                config = MixtralConfig.from_pretrained(filepath)
+                config.num_experts_per_tok = top_k
+                config.num_local_experts = num_experts
+                config.router_aux_loss_coef = 1e-2
+                config.act_rescale = True
+                config.moe_type = moe_type
+                config.intermediate_size = config.intermediate_size // num_experts
+                config.auto_map = {
+                    "AutoConfig": "configuration_mixtral.MixtralConfig",
+                    "AutoModel": "modeling_mixtral.MixtralModel",
+                    "AutoModelForCausalLM": "modeling_mixtral.MixtralForCausalLM",
+                }
+                config.save_pretrained(dump_folder)
+                for filename in [
+                    "configuration_mixtral.py",
+                    "modeling_mixtral.py",
+                ]:
+                    shutil.copy2(f"smoe/models/mixtral/{filename}", dump_folder / filename)
+                (dump_folder / "__init__.py").touch()
+            elif filepath.name == "model.safetensors.index.json":
+                raw_total_size = load_json(filepath)["metadata"]["total_size"]
+            else:
+                # cp to dump_dir
+                shutil.copy2(filepath, dump_folder / filepath.name)
 
     router_records = set()
     weight_map = {}
@@ -116,14 +120,17 @@ def convert_safetensors(
                     # initialize gate weights
                     if layer_idx not in router_records:
                         if gate_weights is None:  # use newly initialized gate weights
+                            # TODO by DDZ: all zeros may be problematic here. I suggest using random initialization, where the initialization std should be adjusted according to the std of hidden features. You can try this out if possible.
+                            gate_weight = torch.zeros(num_experts, hsz)
+                            init.kaiming_uniform_(gate_weight, a=math.sqrt(5))
                             tensors[
                                 f"model.layers.{layer_idx}.block_sparse_moe.gate.weight"
-                            ] = torch.zeros(num_experts, hsz)  # TODO by DDZ: all zeros may be problematic here. I suggest using random initialization, where the initialization std should be adjusted according to the std of hidden features. You can try this out if possible.
+                            ] = gate_weight
                         else:  # use provided gate weights
                             print(f"Initializing layer {layer_idx} gate weights using {gate_weights[layer_idx]}...")
                             tensors[
                                 f"model.layers.{layer_idx}.block_sparse_moe.gate.weight"
-                            ] = gate_weights[layer_idx]
+                            ] = gate_weights[layer_idx].clone()
                         router_records.add(layer_idx)
                     new_ffn_type = ffn_type_map[ffn_type]
 
@@ -230,16 +237,20 @@ def convert_safetensors(
     index = {"metadata": metadata, "weight_map": weight_map}
     dump_json(index, dump_folder / "model.safetensors.index.json", indent=2)
     assert total_size - total_gate_size == raw_total_size
-    # fmt: on
 
 
 if __name__ == "__main__":
-    num_experts = 56
-    top_k = 8
+    num_experts = 8
+    top_k = 2
 
-    src_model_dir = "/mnt/petrelfs/share_data/quxiaoye/models/Meta-Llama-3-8B-Instruct"
-    tgt_model_dir_prefix = "/mnt/petrelfs/zhutong/smoe/resources/llama-3-8b-mixtral"
-    tgt_moe_types = ["modulelist", "megablocks", "scattermoe"]
+    # src_model_dir = "/mnt/petrelfs/share_data/quxiaoye/models/Meta-Llama-3-8B-Instruct"
+    # tgt_model_dir_prefix = f"/mnt/petrelfs/share_data/quxiaoye/llama_moe_v2/converted_models/split-sequential-Top{top_k}"
+
+    src_model_dir = "/mnt/petrelfs/share_data/quxiaoye/models/Meta-Llama-3-8B"
+    tgt_model_dir_prefix = f"/mnt/petrelfs/share_data/quxiaoye/llama_moe_v2/converted_models/base-split-sequential-Top{top_k}"
+
+    # tgt_moe_types = ["modulelist", "megablocks", "scattermoe"]
+    tgt_moe_types = ["modulelist"]
 
     neuron_indices_file = ""
     gate_weights_file = ""
@@ -248,19 +259,19 @@ if __name__ == "__main__":
         print(f"converting {moe_type}")
         convert_safetensors(
             src_model_dir,
-            f"{tgt_model_dir_prefix}-{moe_type}-{num_experts}e-top{top_k}",
+            f"{tgt_model_dir_prefix}",
             num_experts=num_experts,
             top_k=top_k,
             moe_type=moe_type,
-            neuron_indices=None
-            if neuron_indices_file == ""
-            else torch.load(neuron_indices_file),
-            gate_weights=None
-            if gate_weights_file == ""
-            else torch.load(gate_weights_file),
+            neuron_indices=None if neuron_indices_file == "" else torch.load(neuron_indices_file),
+            gate_weights=None if gate_weights_file == "" else torch.load(gate_weights_file),
         )
 
         print(f"testing {moe_type}")
-        m = MixtralForCausalLM.from_pretrained(
-            f"{tgt_model_dir_prefix}-{moe_type}-{num_experts}e-top{top_k}",
-        )
+        m = MixtralForCausalLM.from_pretrained(f"{tgt_model_dir_prefix}").bfloat16()
+
+        print(f"Re-saving {moe_type}")
+        m.save_pretrained(f"{tgt_model_dir_prefix}")
+
+        print("Done")
+    # fmt: on

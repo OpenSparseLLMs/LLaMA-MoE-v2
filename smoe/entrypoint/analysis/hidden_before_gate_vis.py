@@ -14,11 +14,7 @@ from tqdm import tqdm, trange
 from smoe.data.collate_fn import fault_tolerance_data_collator
 from smoe.data.streaming import CachedJsonlDataset
 from smoe.models.llama_moe import LlamaMoEForCausalLM
-from smoe.models.llama_moe.modeling_llama_moe import (
-    LlamaMoEDecoderLayer,
-    MoEDecoderLayerOutput,
-    MoEMlpOutput,
-)
+from smoe.models.llama_moe.modeling_llama_moe import LlamaMoEDecoderLayer, MoEMlpOutput
 from smoe.modules.moe.moe_gates import TopKBalancedNoisyGate
 
 eval_path_map = {
@@ -45,7 +41,7 @@ def hidden_recording_forward(
     past_key_value=None,
     output_attentions=False,
     use_cache=False,
-) -> MoEDecoderLayerOutput:
+):
     residual = hidden_states
     hidden_states = self.input_layernorm(hidden_states)
 

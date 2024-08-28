@@ -375,7 +375,7 @@ def main():
             all_clustering_hidden_states = torch.cat(all_clustering_hidden_states, dim=0)
             if accelerator.num_processes > 1:
                 # pad to make the tensors share the same shape
-                pass
+                raise NotImplementedError("Please use 1 GPU to run.")
             all_clustering_hidden_states = accelerator.gather(all_clustering_hidden_states).cpu().float().reshape(-1, hidden_size)
             all_clustering_hidden_states = all_clustering_hidden_states.numpy()
 

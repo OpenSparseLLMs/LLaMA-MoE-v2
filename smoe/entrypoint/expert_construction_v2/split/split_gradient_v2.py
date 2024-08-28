@@ -11,6 +11,7 @@ from smoe.utils.io import create_dir
 from smoe.utils.operations.operation_string import str2bool
 
 
+# fmt: off
 class GradientSplitV2(GradientSplit):
     # Here we only use the `split` function in `GradientSplit`.
     # Other functions may raise errors as the format of `self.labels` is changed.
@@ -29,7 +30,6 @@ class GradientSplitV2(GradientSplit):
 
 
 if __name__ == "__main__":
-    # fmt: off
     parser = argparse.ArgumentParser()
     parser.add_argument('--model_path', type=str)
     parser.add_argument('--save_path', type=str)
@@ -72,4 +72,5 @@ if __name__ == "__main__":
     create_dir(args.save_path)
     torch.save(neuron_indices, os.path.join(args.save_path, "neuron_indices.pt"))
     print("Done.")
-    # fmt: on
+
+# fmt: on

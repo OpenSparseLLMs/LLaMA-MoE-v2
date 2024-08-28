@@ -2,10 +2,13 @@ import argparse
 
 import torch
 
-from smoe.utils.expert_construction.convert_llama_to_mixtral_residual import convert_residual_safetensors
+from smoe.utils.expert_construction.convert_llama_to_mixtral_residual import (
+    convert_residual_safetensors,
+)
+
+# fmt: off
 
 if __name__ == "__main__":
-    # fmt: off
     parser = argparse.ArgumentParser()
     parser.add_argument('--model_path', type=str)
     parser.add_argument('--save_path', type=str)
@@ -35,4 +38,5 @@ if __name__ == "__main__":
         gate_weights=None if args.gate_weights_file is None else torch.load(args.gate_weights_file),
     )
     print("Done!")
-    # fmt: on
+
+# fmt: on

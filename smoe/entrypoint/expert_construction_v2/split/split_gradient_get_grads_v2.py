@@ -45,6 +45,11 @@ class SplitArguments:
 
 
 def main():
+    """
+    Reference:
+    SNIP: Single-shot Network Pruning based on Connection Sensitivity
+    https://arxiv.org/abs/1810.02340
+    """
     # fmt: off
     model_args, data_args, training_args, split_args = parse_args(
         ModelArguments, DataArguments, EnhancedTrainingArguments, SplitArguments
