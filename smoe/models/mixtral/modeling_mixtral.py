@@ -281,6 +281,8 @@ def load_balancing_loss_func(
     else:
         if isinstance(gate_logits, tuple):
             gate_logits = (torch.cat(gate_logits, dim=0),)
+        else:
+            gate_logits = (gate_logits,)
 
     all_balance_losses = []
 
@@ -310,7 +312,7 @@ def load_balancing_loss_func(
         balance_loss = torch.mean(
             tokens_per_group_and_expert * router_prob_per_group_and_expert.unsqueeze(-1)
         ) * (num_experts**2)
-        all_balance_losses.append(balance_loss)
+        all_balance_losses.append(balance_loss.reshape(1))
 
     all_balance_losses = torch.cat(all_balance_losses).mean()  # ✨
 
@@ -1731,7 +1733,7 @@ class MixtralDecoderLayer(nn.Module):
         hidden_states = self.input_layernorm(hidden_states)
 
         # 🔍 Self Attention
-        if self.config.use_attn_moe:
+        if self.use_attn_moe:
             (
                 hidden_states,
                 self_attn_weights,
