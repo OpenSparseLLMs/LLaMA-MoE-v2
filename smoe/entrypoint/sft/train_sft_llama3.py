@@ -153,6 +153,44 @@ def preprocess(
     )
 
 
+def simple_fault_tolerance_data_collator(features: list) -> dict[str, Any]:
+    batch = {}
+    first = features[0]
+    assert all(key in first for key in ["input_ids", "labels", "attention_mask"])
+    max_len = max([len(feature["input_ids"]) for feature in features])
+    for feature in features:
+        # Simple for llama3, we directly use '<|eot_id|>' (128009) for pad token. You should change for other models.
+        feature["input_ids"] = torch.cat(
+            [
+                feature["input_ids"],
+                torch.tensor(
+                    [128009] * (max_len - len(feature["input_ids"])), dtype=torch.long
+                ),
+            ]
+        )
+        feature["labels"] = torch.cat(
+            [
+                feature["labels"],
+                torch.tensor(
+                    [-100] * (max_len - len(feature["labels"])), dtype=torch.long
+                ),
+            ]
+        )
+        feature["attention_mask"] = torch.cat(
+            [
+                feature["attention_mask"],
+                torch.tensor(
+                    [0] * (max_len - len(feature["attention_mask"])), dtype=torch.long
+                ),
+            ]
+        )
+
+    for k, v in first.items():
+        batch[k] = torch.stack([f[k] for f in features])
+
+    return batch
+
+
 def fault_tolerance_data_collator(features: list) -> dict[str, Any]:
     if not isinstance(features[0], Mapping):
         try:
@@ -236,7 +274,7 @@ class CachedJsonlDataset(Dataset):
 
     def __getitem__(self, index):
         ins = self.data[index]
-        processed = preprocess([ins], self.tokenizer)
+        processed = preprocess(ins, self.tokenizer)
         ins = {}
         for key in processed:
             ins[key] = processed[key][0]
@@ -422,7 +460,9 @@ def train():
         tokenizer=tokenizer,
         args=training_args,
         train_dataset=train_dataset,
-        data_collator=fault_tolerance_data_collator,
+        data_collator=simple_fault_tolerance_data_collator,
+        # data_collator=fault_tolerance_data_collator,
+        # num_processes=1 # for flash_attention_2
     )
     logger.info("trainer ready")
 
@@ -438,7 +478,7 @@ def train():
     if training_args.save_final_ckpt:
         logger.info("training finished, dumping model")
         model.config.use_cache = True
-        trainer.save_state()
+        trainer.save_state()  # for debug, not save
         if trainer.is_deepspeed_enabled:
             trainer.save_model()
         else:

@@ -48,6 +48,7 @@ def convert_residual_safetensors(
                 tensor_filepaths.append(filepath)
             if filepath.name == "config.json":
                 config = MixtralConfig.from_pretrained(filepath)
+                config.architectures = ["MixtralForCausalLM"]
                 config.num_experts_per_tok = top_k
                 config.num_local_experts = num_experts
                 config.router_aux_loss_coef = 1e-2

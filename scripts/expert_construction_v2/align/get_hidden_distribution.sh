@@ -1,8 +1,8 @@
 #!/usr/bin/bash
 
-#SBATCH --job-name=clustering
-#SBATCH --output=logs_split/%x-%j.log
-#SBATCH --error=logs_split/%x-%j.log
+#SBATCH --job-name=distribution
+#SBATCH --output=logs_align/%x-%j.log
+#SBATCH --error=logs_align/%x-%j.log
 
 #SBATCH --partition=MoE
 #SBATCH --ntasks-per-node=1
@@ -11,10 +11,9 @@
 
 #SBATCH --nodes=1
 #SBATCH --gres=gpu:1
-#SBATCH --quotatype=reserved
+#SBATCH --quotatype=auto
 
 # reserved spot auto
-# NOTE: This is better to be run on single GPU as the clustering is time-consuming, which may cause the NCCL timeout error!!!!!!!!!!!!!!!!
 
 num_nodes=1        # should match with --nodes
 num_cpus=16        # should match with --cpus-per-task
@@ -61,29 +60,19 @@ export LOGLEVEL=INFO
 
 {
   model_type="llama"
-  model_path="/mnt/petrelfs/share_data/quxiaoye/models/Meta-Llama-3-8B-Instruct"
+  folder_name="Meta-Llama-3-8B-Instruct"
+  model_path="/mnt/petrelfs/share_data/quxiaoye/models/${folder_name}"
   dataset_dir_or_path="/mnt/petrelfs/share_data/quxiaoye/llama_moe_v2/OpenHermes-2.5/openhermes2_5.jsonl"
 
-  per_device_train_batch_size=8
-  max_steps=10 # the total number of samples shouldn't be too large, as the KMeans is of n^2 complexity
+  per_device_train_batch_size=4
+  max_steps=500 # the total number of samples shouldn't be too large, as the KMeans is of n^2 complexity
   model_max_length=4096
 
   echo "Maximum number of tokens for clustering: $((${num_gpu_per_node} * ${per_device_train_batch_size} * ${max_steps} * ${model_max_length})) (paddings are taken into account here)"
 
-  # 3 4
-  # 6 7 8
-  # 12 14 16
-  # 24 28 32
-  num_experts=32
-  balance_jitter_factor=0.4 # hyper-parameter for adjusting the cluster size, will affect the initialization of gate weights. (0.0 for strictly balanced, however the performance may be worse.)
-  distance_metric="l2"      # l2 cos
-  max_iter=100
-  random_state=114514
-  n_jobs=${num_cpus} # how many different runs will be applied to each clustering process to get a better solution
-
-  output_dir="/mnt/petrelfs/share_data/quxiaoye/llama_moe_v2/v2_mixtral_gate"
-  output_dir="${output_dir}/${num_experts}experts-${balance_jitter_factor}jitter-${distance_metric}"
-  save_path="${output_dir}/results"
+  output_dir="/mnt/petrelfs/share_data/quxiaoye/llama_moe_v2/v2_mixtral_alignment"
+  output_dir="${output_dir}/distribution"
+  save_path="${output_dir}/${folder_name}"
 
   srun torchrun \
     --nnodes ${num_nodes} \
@@ -92,12 +81,11 @@ export LOGLEVEL=INFO
     --rdzv_id $RANDOM \
     --rdzv_backend c10d \
     --rdzv_endpoint $head_node:$port \
-    smoe/entrypoint/expert_construction_v2/get_gates/hidden_feature_clustering.py \
+    smoe/entrypoint/expert_construction_v2/align/get_hidden_distribution.py \
     --model_name_or_path ${model_path} \
     --model_type ${model_type} \
     --dataset_dir_or_path ${dataset_dir_or_path} \
     --per_device_train_batch_size ${per_device_train_batch_size} \
-    --seed ${random_state} \
     --bf16 \
     --max_steps ${max_steps} \
     --model_max_length ${model_max_length} \
@@ -105,11 +93,5 @@ export LOGLEVEL=INFO
     --overwrite_output_dir \
     --torch_dtype bfloat16 \
     --report_to none \
-    --save_path ${save_path} \
-    --num_experts ${num_experts} \
-    --balance_jitter_factor ${balance_jitter_factor} \
-    --distance_metric ${distance_metric} \
-    --max_iter ${max_iter} \
-    --random_state ${random_state} \
-    --n_jobs ${n_jobs}
+    --save_path ${save_path}
 }

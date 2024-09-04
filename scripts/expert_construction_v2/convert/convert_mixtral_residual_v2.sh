@@ -18,9 +18,9 @@
 {
   model_path="/mnt/petrelfs/share_data/quxiaoye/models/Meta-Llama-3-8B-Instruct"
 
-  num_experts=6
-  num_residual=2
-  top_k=2
+  num_experts=7
+  num_residual=1
+  top_k=1
   scale_factor=1.0
   moe_implementation_type="modulelist" #  modulelist megablocks scattermoe
 

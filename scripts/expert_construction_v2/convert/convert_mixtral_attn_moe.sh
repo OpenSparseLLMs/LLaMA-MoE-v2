@@ -17,7 +17,7 @@
 
 {
 #  folder_name="split-gradient-max-ShareFalse-8MoE-Top2-Scale1.0"
-  folder_name="split-gradient-max-ShareFalse-1Residual-7MoE-Top2-Scale1.0"
+  folder_name="split-gradient-max-ShareFalse-1Residual-7MoE-Top1-Scale1.0"
   model_path="/mnt/petrelfs/share_data/quxiaoye/llama_moe_v2/converted_models/${folder_name}"
 
   top_k_attn=7

@@ -1,6 +1,7 @@
 import os
 import types
 
+import torch
 from torch import nn
 from transformers.models.llama.modeling_llama import (
     LlamaDecoderLayer,
@@ -9,6 +10,7 @@ from transformers.models.llama.modeling_llama import (
 )
 
 from smoe.utils.model_operation.change_llama_forward import (
+    forward_llama_decoder_with_hidden_states_distribution_recording,
     forward_llama_decoder_with_hidden_states_scale_recording,
     forward_llama_decoder_with_padding_mask,
     forward_llama_mlp_with_feature_dumping,
@@ -80,6 +82,29 @@ def llama_with_feature_dumping(model, device_id, save_path, template, save_inter
             os.makedirs(mlp.save_path_hidden_inputs)
         if not os.path.exists(mlp.save_path_hidden_outputs):
             os.makedirs(mlp.save_path_hidden_outputs)
+
+    return model
+    # fmt: on
+
+
+def llama_with_hidden_distribution_recording(model):
+    # fmt: off
+    assert isinstance(model, LlamaModel)
+    hidden_size = model.config.hidden_size
+
+    for layer_idx, layer in enumerate(model.layers):  # locate block by the name template
+        layer.layer_idx = layer_idx
+        layer.attn_distribution = {
+            "number": torch.zeros((1,)),
+            "mean": torch.zeros((hidden_size,)),
+            "variance": torch.zeros((hidden_size,)),
+        }
+        layer.mlp_distribution = {
+            "number": torch.zeros((1,)),
+            "mean": torch.zeros((hidden_size,)),
+            "variance": torch.zeros((hidden_size,)),
+        }
+        layer.forward = types.MethodType(forward_llama_decoder_with_hidden_states_distribution_recording, layer)  # change forward function for LlamaDecoderLayer
 
     return model
     # fmt: on
