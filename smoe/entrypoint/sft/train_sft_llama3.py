@@ -109,22 +109,42 @@ def preprocess(
     tokenizer: transformers.PreTrainedTokenizer,
 ) -> Dict:
     # Apply prompt templates
-    conversations = []
-    for i, ins in enumerate(instances):
-        prompt = Llama3ConversationTemplate.parse(ins["conversations"])
-        conversations.append(prompt)
+
+    prompt, source_part = Llama3ConversationTemplate.parse(
+        instances["conversations"], skip_system=True
+    )
 
     # Tokenize conversations
-    res = tokenizer(
-        conversations,
+    res_conv = tokenizer(
+        prompt,
         return_tensors="pt",
-        padding="max_length",
+        padding=False,
         max_length=tokenizer.model_max_length,
         truncation=True,
     )
-    input_ids = res["input_ids"]
-    attention_masks = res["attention_mask"]
-    targets = input_ids.clone()
+
+    input_ids = res_conv["input_ids"]
+    import copy
+
+    targets = copy.deepcopy(input_ids)
+
+    res_source = tokenizer(
+        source_part,
+        return_tensors="pt",
+        padding=False,
+        max_length=tokenizer.model_max_length,
+        truncation=True,
+    )
+
+    source_length = res_source["input_ids"].shape[1]
+
+    targets[0][
+        :source_length
+    ] = -100  # ignore loss for source part, the target is two dimensional tensor
+
+    attention_masks = torch.tensor(
+        [[0 if input_id_seq == -100 else 1 for input_id_seq in input_ids[0]]]
+    )
 
     return dict(
         input_ids=input_ids,
