@@ -7,25 +7,13 @@ from transformers import AutoConfig, AutoModel, AutoModelForCausalLM, AutoTokeni
 
 from smoe.models.mixtral import MixtralConfig, MixtralForCausalLM, MixtralModel
 from smoe.models.mixtral.modeling_mixtral import MISTRAL_ATTENTION_MOE_CLASSES
-from smoe.models.mixtral_residual.configuration_mixtral_residual import (
-    MixtralResidualConfig,
-)
-from smoe.models.mixtral_residual.modeling_mixtral_residual import (
-    MixtralResidualForCausalLM,
-    MixtralResidualModel,
-)
 
 # fmt: off
 
 # 🔍
 AutoConfig.register("mixtral", MixtralConfig, exist_ok=True)
-AutoConfig.register("mixtral_residual", MixtralResidualConfig, exist_ok=True)
-
 AutoModel.register(MixtralConfig, MixtralModel, exist_ok=True)
-AutoModel.register(MixtralResidualConfig, MixtralResidualModel, exist_ok=True)
-
 AutoModelForCausalLM.register(MixtralConfig, MixtralForCausalLM, exist_ok=True)
-AutoModelForCausalLM.register(MixtralResidualConfig, MixtralResidualForCausalLM, exist_ok=True)
 
 if __name__ == "__main__":
     parser = argparse.ArgumentParser()
@@ -74,9 +62,6 @@ if __name__ == "__main__":
     if isinstance(model, MixtralForCausalLM):
         shutil.copy(os.path.join(current_path, "../../../models/mixtral/configuration_mixtral.py"), args.save_path)
         shutil.copy(os.path.join(current_path, "../../../models/mixtral/modeling_mixtral.py"), args.save_path)
-    elif isinstance(model, MixtralResidualForCausalLM):
-        shutil.copy(os.path.join(current_path, "../../../models/mixtral_residual/configuration_mixtral_residual.py"), args.save_path)
-        shutil.copy(os.path.join(current_path, "../../../models/mixtral_residual/modeling_mixtral_residual.py"), args.save_path)
     else:
         warnings.warn(f"[WARN] unknown model type {type(model)}")
 

@@ -66,7 +66,7 @@ per_device_train_batch_size=8
 max_steps=10 # the total number of samples shouldn't be too large, as the KMeans is of n^2 complexity
 model_max_length=4096
 
-echo "Maximum number of tokens for clustering: $((${num_gpu_per_node} * ${per_device_train_batch_size} * ${max_steps} * ${model_max_length})) (paddings are taken into account here)"
+echo "Maximum number of tokens for selection: $((${num_gpu_per_node} * ${per_device_train_batch_size} * ${max_steps} * ${model_max_length})) (paddings are taken into account here)"
 
 num_experts=16
 random_state=114514

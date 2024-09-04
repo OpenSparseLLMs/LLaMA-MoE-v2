@@ -120,7 +120,6 @@ def convert_safetensors(
                     # initialize gate weights
                     if layer_idx not in router_records:
                         if gate_weights is None:  # use newly initialized gate weights
-                            # TODO by DDZ: all zeros may be problematic here. I suggest using random initialization, where the initialization std should be adjusted according to the std of hidden features. You can try this out if possible.
                             gate_weight = torch.zeros(num_experts, hsz)
                             init.kaiming_uniform_(gate_weight, a=math.sqrt(5))
                             tensors[
@@ -197,6 +196,7 @@ def convert_safetensors(
                             raise KeyError
                     else:
                         raise NotImplementedError
+
                 else:
                     tensors[key] = tensor
 
@@ -263,8 +263,12 @@ if __name__ == "__main__":
             num_experts=num_experts,
             top_k=top_k,
             moe_type=moe_type,
-            neuron_indices=None if neuron_indices_file == "" else torch.load(neuron_indices_file),
-            gate_weights=None if gate_weights_file == "" else torch.load(gate_weights_file),
+            neuron_indices=None
+            if neuron_indices_file == ""
+            else torch.load(neuron_indices_file),
+            gate_weights=None
+            if gate_weights_file == ""
+            else torch.load(gate_weights_file),
         )
 
         print(f"testing {moe_type}")

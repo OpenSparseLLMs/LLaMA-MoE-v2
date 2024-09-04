@@ -24,14 +24,14 @@ if __name__ == "__main__":
 
     neuron_indices = torch.load(args.neuron_indices_file)
     intermediate_size = len(neuron_indices[0][0])
-    residual_intermediate_size = len(neuron_indices[0]["residual"])
+    intermediate_size_residual = len(neuron_indices[0]["residual"])
 
     convert_residual_safetensors(
         args.model_path,
         args.save_path,
         num_experts=args.num_experts,
         intermediate_size=intermediate_size,
-        residual_intermediate_size=residual_intermediate_size,
+        intermediate_size_residual=intermediate_size_residual,
         top_k=args.top_k,
         moe_type=args.moe_implementation_type,
         neuron_indices=neuron_indices,

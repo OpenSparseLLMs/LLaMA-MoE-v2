@@ -145,6 +145,7 @@ class MixtralConfig(PretrainedConfig):
         vocab_size=32000,
         hidden_size=4096,
         intermediate_size=14336,
+        intermediate_size_residual=None,  # 🔍
         num_hidden_layers=32,
         num_attention_heads=32,
         num_key_value_heads=8,
@@ -170,12 +171,14 @@ class MixtralConfig(PretrainedConfig):
         top_k_attn: int = 7,  # 🔍
         scale_factor_attn: float = None,  # 🔍
         use_layer_wise_balance: bool = False,  # ✨ whether to fix the balance loss bug for Mixtral
+        add_rescale_bias: bool = False,  # 🔍 whether to add bias to the AttentionMoE `o_proj` & MoE `down_proj` for distribution alignment
         **kwargs,
     ):
         self.vocab_size = vocab_size
         self.max_position_embeddings = max_position_embeddings
         self.hidden_size = hidden_size
         self.intermediate_size = intermediate_size
+        self.intermediate_size_residual = intermediate_size_residual  # 🔍
         self.num_hidden_layers = num_hidden_layers
         self.num_attention_heads = num_attention_heads
         self.sliding_window = sliding_window
@@ -214,6 +217,9 @@ class MixtralConfig(PretrainedConfig):
 
         # ✨ For balance loss bugfix
         self.use_layer_wise_balance = use_layer_wise_balance
+
+        # 🔍 for distribution alignment
+        self.add_rescale_bias = add_rescale_bias
 
         # Attention implementation to use, if relevant.
         self._attn_implementation_internal = kwargs.pop("attn_implementation", None)

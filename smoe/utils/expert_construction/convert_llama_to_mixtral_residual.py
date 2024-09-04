@@ -11,10 +11,8 @@ from safetensors.torch import save_file
 from torch.nn import init
 from transformers.modeling_utils import dtype_byte_size
 
+from smoe.models.mixtral import MixtralForCausalLM
 from smoe.models.mixtral.configuration_mixtral import MixtralConfig
-from smoe.models.mixtral_residual.modeling_mixtral_residual import (
-    MixtralResidualForCausalLM,
-)
 from smoe.utils.expert_construction.convert_llama_to_mixtral import (
     FFN_TYPE_MAP,
     is_safetensors_file,
@@ -27,7 +25,7 @@ def convert_residual_safetensors(
     dump_dir,
     num_experts: int,
     intermediate_size: int,  # 🔍
-    residual_intermediate_size: int,  # 🔍
+    intermediate_size_residual: int,  # 🔍
     top_k: int,
     moe_type: str,
     neuron_indices: dict = None,
@@ -55,18 +53,18 @@ def convert_residual_safetensors(
                 config.act_rescale = True
                 config.moe_type = moe_type
                 config.intermediate_size = intermediate_size  # 🔍
-                config.residual_intermediate_size = residual_intermediate_size  # 🔍
+                config.intermediate_size_residual = intermediate_size_residual  # 🔍
                 config.auto_map = {
-                    "AutoConfig": "configuration_mixtral_residual.MixtralResidualConfig",  # 🔍
-                    "AutoModel": "modeling_mixtral_residual.MixtralResidualModel",  # 🔍
-                    "AutoModelForCausalLM": "modeling_mixtral_residual.MixtralResidualForCausalLM",  # 🔍
+                    "AutoConfig": "configuration_mixtral.MixtralConfig",
+                    "AutoModel": "modeling_mixtral.MixtralModel",
+                    "AutoModelForCausalLM": "modeling_mixtral.MixtralForCausalLM",
                 }
                 config.save_pretrained(dump_folder)
                 for filename in [
-                    "configuration_mixtral_residual.py",  # 🔍
-                    "modeling_mixtral_residual.py",  # 🔍
+                    "configuration_mixtral.py",
+                    "modeling_mixtral.py",
                 ]:
-                    shutil.copy2(f"smoe/models/mixtral_residual/{filename}", dump_folder / filename)  # 🔍
+                    shutil.copy2(f"smoe/models/mixtral/{filename}", dump_folder / filename)
                 (dump_folder / "__init__.py").touch()
             elif filepath.name == "model.safetensors.index.json":
                 raw_total_size = load_json(filepath)["metadata"]["total_size"]
@@ -105,7 +103,6 @@ def convert_residual_safetensors(
                     # initialize gate weights
                     if layer_idx not in router_records:
                         if gate_weights is None:  # use newly initialized gate weights
-                            # TODO by DDZ: all zeros may be problematic here. I suggest using random initialization, where the initialization std should be adjusted according to the std of hidden features. You can try this out if possible.
                             gate_weight = torch.zeros(num_experts, hsz)
                             init.kaiming_uniform_(gate_weight, a=math.sqrt(5))
                             tensors[
@@ -128,7 +125,7 @@ def convert_residual_safetensors(
                         expert_tensor = tensor[this_layer_indices['residual']].clone()
                     else:
                         expert_tensor = tensor[:, this_layer_indices['residual']].clone()
-                    tensors[f"model.layers.{layer_idx}.block_sparse_moe.experts_residual.{new_ffn_type}.weight"] = expert_tensor
+                    tensors[f"model.layers.{layer_idx}.mlp_residual.{new_ffn_type}.weight"] = expert_tensor
 
                     # add moe weights
                     if moe_type == "megablocks":
@@ -237,7 +234,7 @@ if __name__ == "__main__":
 
     neuron_indices = torch.load(neuron_indices_file)
     intermediate_size = len(neuron_indices[0][0])
-    residual_intermediate_size = len(neuron_indices[0]["residual"])
+    intermediate_size_residual = len(neuron_indices[0]["residual"])
 
     for moe_type in tgt_moe_types:
         print(f"converting {moe_type}")
@@ -247,14 +244,18 @@ if __name__ == "__main__":
             num_experts=num_experts,
             top_k=top_k,
             intermediate_size=intermediate_size,  # 🔍
-            residual_intermediate_size=residual_intermediate_size,  # 🔍
+            intermediate_size_residual=intermediate_size_residual,  # 🔍
             moe_type=moe_type,
             neuron_indices=neuron_indices,  # 🔍
-            gate_weights=None if gate_weights_file == "" else torch.load(gate_weights_file),
+            gate_weights=None
+            if gate_weights_file == ""
+            else torch.load(gate_weights_file),
         )
 
         print(f"testing {moe_type}")
-        m = MixtralResidualForCausalLM.from_pretrained(f"{tgt_model_dir_prefix}-{moe_type}-{num_experts}e-top{top_k}").bfloat16()
+        m = MixtralForCausalLM.from_pretrained(
+            f"{tgt_model_dir_prefix}-{moe_type}-{num_experts}e-top{top_k}"
+        ).bfloat16()
 
         print(f"Re-saving {moe_type}")
         m.save_pretrained(f"{tgt_model_dir_prefix}")

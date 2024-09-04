@@ -821,7 +821,7 @@ class MixtralAttentionMoE(MixtralAttention):
         self.q_proj = nn.ModuleList([nn.Linear(self.hidden_size, self.num_key_value_groups * self.head_dim, bias=False) for _ in range(self.num_key_value_heads)])
         self.k_proj = nn.ModuleList([nn.Linear(self.hidden_size, self.head_dim, bias=False) for _ in range(self.num_key_value_heads)])
         self.v_proj = nn.ModuleList([nn.Linear(self.hidden_size, self.head_dim, bias=False) for _ in range(self.num_key_value_heads)])
-        self.o_proj = nn.ModuleList([nn.Linear(self.num_key_value_groups * self.head_dim, self.hidden_size, bias=False) for _ in range(self.num_key_value_heads)])
+        self.o_proj = nn.ModuleList([nn.Linear(self.num_key_value_groups * self.head_dim, self.hidden_size, bias=config.add_rescale_bias) for _ in range(self.num_key_value_heads)])  # 🔍 (may add bias for rescaling)
 
         self.rotary_emb = MixtralRotaryEmbedding(
             self.head_dim,
@@ -1386,13 +1386,17 @@ class MixtralFlashAttention2(MixtralAttention):
 
 
 class MixtralBLockSparseTop2MLP(nn.Module):
-    def __init__(self, config: MixtralConfig):
+    def __init__(
+        self, config: MixtralConfig, ffn_dim=None, add_rescale_bias=False
+    ):  # 🔍
         super().__init__()
-        self.ffn_dim = config.intermediate_size
+        self.ffn_dim = config.intermediate_size if ffn_dim is None else ffn_dim  # 🔍
         self.hidden_dim = config.hidden_size
 
         self.w1 = nn.Linear(self.hidden_dim, self.ffn_dim, bias=False)  # gate
-        self.w2 = nn.Linear(self.ffn_dim, self.hidden_dim, bias=False)  # down
+        self.w2 = nn.Linear(
+            self.ffn_dim, self.hidden_dim, bias=add_rescale_bias
+        )  # 🔍 down (may add bias for rescaling)
         self.w3 = nn.Linear(self.hidden_dim, self.ffn_dim, bias=False)  # up
 
         self.act_fn = ACT2FN[config.hidden_act]
@@ -1568,7 +1572,12 @@ class MixtralSparseMoeBlock(nn.Module):
 
         if self.moe_type == "modulelist":
             self.experts = nn.ModuleList(
-                [MixtralBLockSparseTop2MLP(config) for _ in range(self.num_experts)]
+                [
+                    MixtralBLockSparseTop2MLP(
+                        config, add_rescale_bias=config.add_rescale_bias
+                    )
+                    for _ in range(self.num_experts)
+                ]  # 🔍
             )
         elif self.moe_type == "megablocks":
             is_fp16 = self.gate.weight.dtype == torch.float16
@@ -1694,6 +1703,16 @@ class MixtralDecoderLayer(nn.Module):
             config.hidden_size, eps=config.rms_norm_eps
         )
 
+        # 🔍
+        if config.intermediate_size_residual is None:
+            self.mlp_residual = None
+        else:
+            self.mlp_residual = MixtralBLockSparseTop2MLP(
+                config,
+                ffn_dim=config.intermediate_size_residual,
+                add_rescale_bias=False,
+            )
+
     def forward(
         self,
         hidden_states: torch.Tensor,
@@ -1764,6 +1783,8 @@ class MixtralDecoderLayer(nn.Module):
         residual = hidden_states
         hidden_states = self.post_attention_layernorm(hidden_states)
         hidden_states, router_logits = self.block_sparse_moe(hidden_states)
+        if self.mlp_residual is not None:
+            hidden_states += self.mlp_residual(hidden_states)  # 🔍
         hidden_states = residual + hidden_states
 
         outputs = (hidden_states,)
