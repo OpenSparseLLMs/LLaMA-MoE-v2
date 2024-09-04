@@ -18,24 +18,18 @@
 {
   model_path="/mnt/petrelfs/share_data/quxiaoye/models/Meta-Llama-3-8B-Instruct"
 
-  num_experts_moe=6
-  num_experts_residual=2
+  num_experts_moe=7
+  num_experts_residual=1
 
   criterion="max"
   share_neurons="False"
 
-#  folder_name="8experts-0.0jitter-l2"
-#  folder_name="8experts-0.4jitter-l2"
-  folder_name="8experts-0.8jitter-l2"
-#  folder_name="16experts-0.0jitter-l2"
-#  folder_name="16experts-0.4jitter-l2"
-#  folder_name="16experts-0.8jitter-l2"
-#  folder_name="16experts-0.0jitter-cos"
-#  folder_name="16experts-0.4jitter-cos"
-#  folder_name="16experts-0.8jitter-cos"
+  #  folder_name="${num_experts_moe}experts-0.8jitter-l2"
+  folder_name="${num_experts_moe}experts-0.4jitter-l2"
+  #  folder_name="${num_experts_moe}experts-0.0jitter-l2"
 
-  score_file="/mnt/petrelfs/dongdaize.d/workspace/llama-moe-v2/outputs/v2_mixtral_gate/${folder_name}/results/importance_scores.pt"
-  output_dir="/mnt/petrelfs/dongdaize.d/workspace/llama-moe-v2/outputs/v2_mixtral_gate/${folder_name}"
+  score_file="/mnt/petrelfs/share_data/quxiaoye/llama_moe_v2/v2_mixtral_gate/${folder_name}/results/importance_scores.pt"
+  output_dir="/mnt/petrelfs/share_data/quxiaoye/llama_moe_v2/v2_mixtral_gate/${folder_name}"
   save_path="${output_dir}/results/split-gradient-${criterion}-Share${share_neurons}-${num_experts_residual}Residual-${num_experts_moe}MoE"
 
   srun python smoe/entrypoint/expert_construction_v2/split/split_gradient_residual_v2.py \

@@ -994,7 +994,7 @@ class MixtralAttentionMoE(MixtralAttention):
             # ---------------------------------------------- #
 
             # 🔍 select & rescale the outputs by softmax scores
-            attn_output = attn_output[current_batch_ids, current_seq_ids] * routing_weights[top_x, idx, None] * self.scale_factor_attn
+            attn_output = attn_output[current_batch_ids, current_seq_ids] * (routing_weights[top_x, idx, None] * self.scale_factor_attn)
             # attn_output = attn_output[current_batch_ids, current_seq_ids] # this line for debug only
 
             # 🔍 add to the final outputs
@@ -1563,7 +1563,6 @@ class MixtralSparseMoeBlock(nn.Module):
         self.top_k = config.num_experts_per_tok
 
         # specialized for llama-moe-v2
-        self.act_rescale = config.act_rescale
         self.scale_factor = config.scale_factor
         self.moe_type = config.moe_type
 
@@ -1659,9 +1658,8 @@ class MixtralSparseMoeBlock(nn.Module):
                 # the current expert. We need to make sure to multiply the output hidden
                 # states by `routing_weights` on the corresponding tokens (top-1 and top-2)
                 current_state = hidden_states[None, top_x_list].reshape(-1, hidden_dim)
-                current_hidden_states = (
-                    expert_layer(current_state)
-                    * routing_weights[top_x_list, idx_list, None]
+                current_hidden_states = expert_layer(current_state) * (
+                    routing_weights[top_x_list, idx_list, None] * self.scale_factor
                 )
 
                 # However `index_add_` only support torch tensors for indexing so we'll use
@@ -1674,8 +1672,6 @@ class MixtralSparseMoeBlock(nn.Module):
             batch_size, sequence_length, hidden_dim
         )
 
-        if self.act_rescale:
-            final_hidden_states = final_hidden_states * self.scale_factor
         return final_hidden_states, router_logits
 
 

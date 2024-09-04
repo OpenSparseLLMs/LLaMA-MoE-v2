@@ -18,23 +18,26 @@
 {
   model_path="/mnt/petrelfs/share_data/quxiaoye/models/Meta-Llama-3-8B-Instruct"
 
+  num_experts=16
+  top_k=8
+  scale_factor=1.0
   moe_implementation_type="modulelist" #  modulelist megablocks scattermoe
-  num_experts=8
-  top_k=2
 
-  folder_name="8experts-0.4jitter-l2"
-  split_folder_name="split-gradient-max-ShareFalse"
+  folder_name="${num_experts}experts-0.4jitter-l2"
+  split_folder_name="split-gradient-max-ShareFalse-${num_experts}MoE"
 
-  save_path="/mnt/petrelfs/dongdaize.d/workspace/llama-moe-v2/outputs/v2_mixtral_gate/${folder_name}/models/${split_folder_name}-Top${top_k}"
-  neuron_indices_file="/mnt/petrelfs/dongdaize.d/workspace/llama-moe-v2/outputs/v2_mixtral_gate/${folder_name}/results/${split_folder_name}/neuron_indices.pt"
-  gate_weights_file="/mnt/petrelfs/dongdaize.d/workspace/llama-moe-v2/outputs/v2_mixtral_gate/${folder_name}/results/gate_weights.pt"
+  save_path="/mnt/petrelfs/share_data/quxiaoye/llama_moe_v2/converted_models/${split_folder_name}-Top${top_k}-Scale${scale_factor}"
+  #  save_path="/mnt/petrelfs/share_data/quxiaoye/llama_moe_v2/v2_mixtral_gate/${folder_name}/models/${split_folder_name}-Top${top_k}-Scale${scale_factor}"
+  neuron_indices_file="/mnt/petrelfs/share_data/quxiaoye/llama_moe_v2/v2_mixtral_gate/${folder_name}/results/${split_folder_name}/neuron_indices.pt"
+  gate_weights_file="/mnt/petrelfs/share_data/quxiaoye/llama_moe_v2/v2_mixtral_gate/${folder_name}/results/gate_weights.pt"
 
   srun python smoe/entrypoint/expert_construction_v2/convert/convert_mixtral_v2.py \
     --model_path ${model_path} \
     --save_path ${save_path} \
     --neuron_indices_file ${neuron_indices_file} \
     --gate_weights_file ${gate_weights_file} \
-    --moe_implementation_type ${moe_implementation_type} \
     --num_experts ${num_experts} \
-    --top_k ${top_k}
+    --top_k ${top_k} \
+    --scale_factor ${scale_factor} \
+    --moe_implementation_type ${moe_implementation_type}
 }

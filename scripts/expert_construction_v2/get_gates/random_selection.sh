@@ -71,8 +71,8 @@ echo "Maximum number of tokens for selection: $((${num_gpu_per_node} * ${per_dev
 num_experts=16
 random_state=114514
 
-output_dir="/mnt/petrelfs/dongdaize.d/workspace/llama-moe-v2/outputs/v2_mixtral_gate_random"
-output_dir="${output_dir}/${num_experts}experts"
+output_dir="/mnt/petrelfs/share_data/quxiaoye/llama_moe_v2/v2_mixtral_gate"
+output_dir="${output_dir}/${num_experts}experts-random-features"
 save_path="${output_dir}/results"
 
 srun torchrun \

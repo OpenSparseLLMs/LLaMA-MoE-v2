@@ -47,7 +47,8 @@ def convert_safetensors(
     dump_dir,
     num_experts: int,
     top_k: int,
-    moe_type: str,
+    scale_factor: int = 1.0,
+    moe_type: str = "modulelist",
     neuron_indices: dict = None,
     gate_weights: dict = None,
 ):
@@ -68,7 +69,7 @@ def convert_safetensors(
                 config.num_experts_per_tok = top_k
                 config.num_local_experts = num_experts
                 config.router_aux_loss_coef = 1e-2
-                config.act_rescale = True
+                config.scale_factor = scale_factor
                 config.moe_type = moe_type
                 config.intermediate_size = config.intermediate_size // num_experts
                 config.auto_map = {

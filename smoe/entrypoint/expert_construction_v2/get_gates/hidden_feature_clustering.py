@@ -274,7 +274,7 @@ def main():
     num_hidden_layers = model.config.num_hidden_layers
     hidden_size = model.config.hidden_size
 
-    assert hidden_size % clustering_args.num_experts == 0
+    # assert hidden_size % clustering_args.num_experts == 0
     balance_jitter_factor = max(0.0, clustering_args.balance_jitter_factor)
 
     # 🔍 prepare accelerator

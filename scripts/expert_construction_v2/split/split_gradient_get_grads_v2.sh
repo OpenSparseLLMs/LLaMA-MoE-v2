@@ -67,20 +67,24 @@ export LOGLEVEL=INFO
   model_max_length=4096
   max_steps=256
 
-  #  folder_name="8experts-0.0jitter-l2"
+  folder_name="2experts-0.4jitter-l2"
+  #  folder_name="3experts-0.4jitter-l2"
+  #  folder_name="4experts-0.4jitter-l2"
+
+  #  folder_name="6experts-0.4jitter-l2"
+  #  folder_name="7experts-0.4jitter-l2"
   #  folder_name="8experts-0.4jitter-l2"
-  #  folder_name="8experts-0.8jitter-l2"
 
-  #  folder_name="16experts-0.0jitter-l2"
+  #  folder_name="12experts-0.4jitter-l2"
+  #  folder_name="14experts-0.4jitter-l2"
   #  folder_name="16experts-0.4jitter-l2"
-  #  folder_name="16experts-0.8jitter-l2"
 
-  #  folder_name="16experts-0.0jitter-cos"
-  folder_name="16experts-0.4jitter-cos"
-  #  folder_name="16experts-0.8jitter-cos"
+  #  folder_name="24experts-0.4jitter-l2"
+  #  folder_name="28experts-0.4jitter-l2"
+  #  folder_name="32experts-0.4jitter-l2"
 
-  gate_weights_file="/mnt/petrelfs/dongdaize.d/workspace/llama-moe-v2/outputs/v2_mixtral_gate/${folder_name}/results/gate_weights.pt"
-  output_dir="/mnt/petrelfs/dongdaize.d/workspace/llama-moe-v2/outputs/v2_mixtral_gate/${folder_name}"
+  gate_weights_file="/mnt/petrelfs/share_data/quxiaoye/llama_moe_v2/v2_mixtral_gate/${folder_name}/results/gate_weights.pt"
+  output_dir="/mnt/petrelfs/share_data/quxiaoye/llama_moe_v2/v2_mixtral_gate/${folder_name}"
   save_path="${output_dir}/results"
 
   srun torchrun \

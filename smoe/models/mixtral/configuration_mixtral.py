@@ -163,12 +163,12 @@ class MixtralConfig(PretrainedConfig):
         attention_dropout=0.0,
         num_experts_per_tok=2,
         num_local_experts=8,
+        scale_factor: float = 1.0,
         output_router_logits=False,
         router_aux_loss_coef=0.001,
-        act_rescale=True,
         moe_type: str = "modulelist",
         use_attn_moe: bool = False,  # 🔍
-        top_k_attn: int = 7,  # 🔍
+        top_k_attn: int = None,  # 🔍
         scale_factor_attn: float = None,  # 🔍
         use_layer_wise_balance: bool = False,  # ✨ whether to fix the balance loss bug for Mixtral
         add_rescale_bias: bool = False,  # 🔍 whether to add bias to the AttentionMoE `o_proj` & MoE `down_proj` for distribution alignment
@@ -183,7 +183,6 @@ class MixtralConfig(PretrainedConfig):
         self.num_attention_heads = num_attention_heads
         self.sliding_window = sliding_window
 
-        self.act_rescale = act_rescale
         self.moe_type = moe_type
 
         # for backward compatibility
@@ -200,20 +199,14 @@ class MixtralConfig(PretrainedConfig):
 
         self.num_experts_per_tok = num_experts_per_tok
         self.num_local_experts = num_local_experts
+        self.scale_factor = scale_factor  # 🔍
         self.output_router_logits = output_router_logits
         self.router_aux_loss_coef = router_aux_loss_coef
-
-        # self.score_scale_factor = kwargs.pop("score_scale_factor", 4.0)
-        self.scale_factor = kwargs.pop(
-            "scale_factor", self.num_local_experts / self.num_experts_per_tok
-        )
 
         # 🔍 for Attention MoE
         self.use_attn_moe = use_attn_moe
         self.top_k_attn = top_k_attn
-        self.scale_factor_attn = (
-            scale_factor_attn if scale_factor_attn is not None else num_key_value_heads
-        )
+        self.scale_factor_attn = scale_factor_attn
 
         # ✨ For balance loss bugfix
         self.use_layer_wise_balance = use_layer_wise_balance
