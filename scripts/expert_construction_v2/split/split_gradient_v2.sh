@@ -18,7 +18,7 @@
 {
   model_path="/mnt/petrelfs/share_data/quxiaoye/models/Meta-Llama-3-8B-Instruct"
 
-  num_experts=16
+  num_experts=32
 
   criterion="max"
   share_neurons="False"

@@ -161,10 +161,10 @@ class GradientSplitResidual(LayerSplit):
         assert expert_size <= self.neuron_num
         if not share_neurons:
             # print("***", expert_size, expert_num, self.neuron_num)
-            if expert_size * (expert_num_moe + expert_num_residual) == self.neuron_num:
+            if expert_size * (expert_num_moe + expert_num_residual) != self.neuron_num:
                 raise ValueError(
-                    f'The number of neurons must be exactly divided by the number of experts for non-shared split!'
-                    f'Now the number of neurons is {self.neuron_num}, but the number of experts is {expert_num_moe} (normal experts) + {expert_num_residual} (residual experts) = {expert_num_moe + expert_num_residual} (total experts), and each expert has {expert_size} neurons.'
+                    f'The number of neurons must be exactly divided by the number of experts for non-shared split!\n'
+                    f'Now the number of neurons is {self.neuron_num}, but the number of experts is {expert_num_moe} (normal experts) + {expert_num_residual} (residual experts) = {expert_num_moe + expert_num_residual} (total experts), and each expert has {expert_size} neurons.\n'
                     f'The total number of neurons in all experts {(expert_num_moe + expert_num_residual) * expert_size} != {self.neuron_num}.'
                 )
             self.split_without_neuron_sharing(expert_num_moe, expert_num_residual, expert_size, criterion)

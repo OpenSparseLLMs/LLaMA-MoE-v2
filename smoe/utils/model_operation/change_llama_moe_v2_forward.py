@@ -40,7 +40,7 @@ def forward_llama_moe_v2_decoder_with_hidden_states_distribution_recording(
     ##########################################################
 
     # 🔍 Self Attention
-    if self.use_attn_moe:
+    if self.is_moe and self.use_attn_moe:
         (
             hidden_states,
             self_attn_weights,
@@ -67,7 +67,142 @@ def forward_llama_moe_v2_decoder_with_hidden_states_distribution_recording(
 
     ##########################################################
     # record distribution for attention
-    if self.align_module is not None and self.align_module == "attn":
+    non_padding_hidden_states = hidden_states[padding_mask]
+
+    this_num = torch.tensor((non_padding_hidden_states.shape[0],), device=hidden_states.device)
+    this_mean = non_padding_hidden_states.mean(dim=0)
+    this_var = non_padding_hidden_states.var(dim=0)
+
+    old_num = self.attn_distribution["number"].to(hidden_states.device)
+    old_mean = self.attn_distribution["mean"].to(hidden_states.device)
+    old_var = self.attn_distribution["variance"].to(hidden_states.device)
+
+    self.attn_distribution["number"] = old_num + this_num
+    self.attn_distribution["mean"] = (old_num * old_mean + this_num * this_mean) / (old_num + this_num)
+    self.attn_distribution["variance"] = (
+        old_num * old_var
+        + this_num * this_var
+        + old_num * this_num / (old_num + this_num) * (old_mean - this_mean) ** 2
+    ) / (old_num + this_num)
+
+    print(f'({hidden_states.device}) (Layer {self.layer_idx}) Attn Number: {old_num} -> {self.attn_distribution["number"]}')
+    print(f'({hidden_states.device}) (Layer {self.layer_idx}) Attn Mean: {old_mean[:8]} -> {self.attn_distribution["mean"][:8]}')
+    print(f'({hidden_states.device}) (Layer {self.layer_idx}) Attn Variance: {old_var[:8]} -> {self.attn_distribution["variance"][:8]}')
+    ##########################################################
+
+    hidden_states = residual + hidden_states
+
+    # Fully Connected
+    residual = hidden_states
+    hidden_states = self.post_attention_layernorm(hidden_states)
+
+    # 🔍
+    if self.is_moe:
+        hidden_states, router_logits = self.block_sparse_moe(hidden_states)
+    else:
+        hidden_states = self.block_sparse_moe(hidden_states)
+        router_logits = None
+
+    ##########################################################
+    # record distribution for MLP
+    non_padding_hidden_states = hidden_states[padding_mask]
+
+    this_num = torch.tensor((non_padding_hidden_states.shape[0],), device=hidden_states.device)
+    this_mean = non_padding_hidden_states.mean(dim=0)
+    this_var = non_padding_hidden_states.var(dim=0)
+
+    old_num = self.mlp_distribution["number"].to(hidden_states.device)
+    old_mean = self.mlp_distribution["mean"].to(hidden_states.device)
+    old_var = self.mlp_distribution["variance"].to(hidden_states.device)
+
+    self.mlp_distribution["number"] = old_num + this_num
+    self.mlp_distribution["mean"] = (old_num * old_mean + this_num * this_mean) / (old_num + this_num)
+    self.mlp_distribution["variance"] = (
+        old_num * old_var
+        + this_num * this_var
+        + old_num * this_num / (old_num + this_num) * (old_mean - this_mean) ** 2
+    ) / (old_num + this_num)
+
+    print(f'({hidden_states.device}) (Layer {self.layer_idx}) MLP Number: {old_num} -> {self.mlp_distribution["number"]}')
+    print(f'({hidden_states.device}) (Layer {self.layer_idx}) MLP Mean: {old_mean[:8]} -> {self.mlp_distribution["mean"][:8]}')
+    print(f'({hidden_states.device}) (Layer {self.layer_idx}) MLP Variance: {old_var[:8]} -> {self.mlp_distribution["variance"][:8]}')
+    ##########################################################
+
+    if self.mlp_residual is not None:
+        hidden_states += self.mlp_residual(hidden_states)  # 🔍
+    hidden_states = residual + hidden_states
+
+    outputs = (hidden_states,)
+
+    if output_attentions:
+        outputs += (self_attn_weights,)
+
+    if use_cache:
+        outputs += (present_key_value,)
+
+    if output_router_logits:
+        outputs += (router_logits, attn_router_logits)  # 🔍
+
+    return outputs
+    # fmt: on
+
+
+def forward_llama_moe_v2_decoder_with_hidden_states_distribution_recording_for_alignment(
+    self,
+    hidden_states: torch.Tensor,
+    attention_mask: Optional[torch.Tensor] = None,
+    position_ids: Optional[torch.LongTensor] = None,
+    past_key_value: Optional[Tuple[torch.Tensor]] = None,
+    output_attentions: Optional[bool] = False,
+    output_router_logits: Optional[bool] = False,
+    use_cache: Optional[bool] = False,
+    **kwargs,
+) -> Tuple[torch.FloatTensor, Optional[Tuple[torch.FloatTensor, torch.FloatTensor]]]:
+    # fmt: off
+    """transformers 4.42.4"""
+    residual = hidden_states
+
+    hidden_states = self.input_layernorm(hidden_states)
+
+    ##########################################################
+    # exclude padding tokens
+    if attention_mask.ndim == 2:
+        padding_mask = attention_mask.clone().bool()
+    elif attention_mask.ndim == 4:
+        padding_mask = ~attention_mask[:, 0, :, :].all(dim=-2)
+    else:
+        raise ValueError("padding_mask must be either 2 or 4 dimensional")
+    ##########################################################
+
+    # 🔍 Self Attention
+    if self.is_moe and self.use_attn_moe:
+        (
+            hidden_states,
+            self_attn_weights,
+            present_key_value,
+            attn_router_logits,
+        ) = self.self_attn(
+            hidden_states=hidden_states,
+            attention_mask=attention_mask,
+            position_ids=position_ids,
+            past_key_value=past_key_value,
+            output_attentions=output_attentions,
+            use_cache=use_cache,
+        )
+    else:
+        hidden_states, self_attn_weights, present_key_value = self.self_attn(
+            hidden_states=hidden_states,
+            attention_mask=attention_mask,
+            position_ids=position_ids,
+            past_key_value=past_key_value,
+            output_attentions=output_attentions,
+            use_cache=use_cache,
+        )
+        attn_router_logits = None
+
+    ##########################################################
+    # record distribution for attention
+    if self.align_module is not None and self.align_module == "attn":  # 🙀 the difference compared to the recording function not for alignment
         non_padding_hidden_states = hidden_states[padding_mask]
 
         this_num = torch.tensor((non_padding_hidden_states.shape[0],), device=hidden_states.device)
@@ -87,9 +222,10 @@ def forward_llama_moe_v2_decoder_with_hidden_states_distribution_recording(
         ) / (old_num + this_num)
 
         # print(f'({hidden_states.device}) (Layer {self.layer_idx}) Attn Number: {old_num} -> {self.distribution["number"]}')
-        # print(f'({hidden_states.device}) (Layer {self.layer_idx}) Attn Mean: {old_mean} -> {self.distribution["mean"]}')
-        # print(f'({hidden_states.device}) (Layer {self.layer_idx}) Attn Variance: {old_var} -> {self.distribution["variance"]}')
+        # print(f'({hidden_states.device}) (Layer {self.layer_idx}) Attn Mean: {old_mean[:8]} -> {self.distribution["mean"][:8]}')
+        # print(f'({hidden_states.device}) (Layer {self.layer_idx}) Attn Variance: {old_var[:8]} -> {self.distribution["variance"][:8]}')
 
+        # 🙀 the difference compared to the recording function not for alignment
         # skip the MLP calculation to save time
         outputs = (hidden_states,)
 
@@ -110,11 +246,17 @@ def forward_llama_moe_v2_decoder_with_hidden_states_distribution_recording(
     # Fully Connected
     residual = hidden_states
     hidden_states = self.post_attention_layernorm(hidden_states)
-    hidden_states, router_logits = self.block_sparse_moe(hidden_states)
+
+    # 🔍
+    if self.is_moe:
+        hidden_states, router_logits = self.block_sparse_moe(hidden_states)
+    else:
+        hidden_states = self.block_sparse_moe(hidden_states)
+        router_logits = None
 
     ##########################################################
     # record distribution for MLP
-    if self.align_module is not None and self.align_module == "mlp":
+    if self.align_module is not None and self.align_module == "mlp":  # 🙀 the difference compared to the recording function not for alignment
         non_padding_hidden_states = hidden_states[padding_mask]
 
         this_num = torch.tensor((non_padding_hidden_states.shape[0],), device=hidden_states.device)
@@ -133,9 +275,9 @@ def forward_llama_moe_v2_decoder_with_hidden_states_distribution_recording(
             + old_num * this_num / (old_num + this_num) * (old_mean - this_mean) ** 2
         ) / (old_num + this_num)
 
-        # print(f'({hidden_states.device}) (Layer {self.layer_idx}) Attn Number: {old_num} -> {self.distribution["number"]}')
-        # print(f'({hidden_states.device}) (Layer {self.layer_idx}) Attn Mean: {old_mean} -> {self.distribution["mean"]}')
-        # print(f'({hidden_states.device}) (Layer {self.layer_idx}) Attn Variance: {old_var} -> {self.distribution["variance"]}')
+        # print(f'({hidden_states.device}) (Layer {self.layer_idx}) MLP Number: {old_num} -> {self.distribution["number"]}')
+        # print(f'({hidden_states.device}) (Layer {self.layer_idx}) MLP Mean: {old_mean[:8]} -> {self.distribution["mean"][:8]}')
+        # print(f'({hidden_states.device}) (Layer {self.layer_idx}) MLP Variance: {old_var[:8]} -> {self.distribution["variance"][:8]}')
     ##########################################################
 
     if self.mlp_residual is not None:

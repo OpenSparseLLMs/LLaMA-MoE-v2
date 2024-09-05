@@ -3,6 +3,8 @@ Modified from smoe/entrypoint/cpt/cpt_fpt.py
 """
 import logging
 import os.path
+import shutil
+import warnings
 from dataclasses import dataclass, field
 from typing import Dict, Optional
 
@@ -18,7 +20,7 @@ from smoe.models.mixtral import MixtralForCausalLM
 from smoe.utils.config import EnhancedTrainingArguments, ModelArguments, parse_args
 from smoe.utils.io import create_dir
 from smoe.utils.model_operation.modify_llama_moe_v2_model import (
-    llama_moe_v2_with_hidden_distribution_recording,
+    llama_moe_v2_with_hidden_distribution_recording_for_alignment,
 )
 
 logger = logging.getLogger(__name__)
@@ -48,13 +50,17 @@ def main():
     )
 
     model, dataloader = prepare_model_and_data(model_args, data_args, training_args)
-    model.model = llama_moe_v2_with_hidden_distribution_recording(model.model)  # 🔍 change the forward function
-    model.config.use_cache = False  # 🔍 set configuration
-    model.config.add_rescale_bias = True  # 🔍 set configuration
 
     # 🔍 model check & prepare configs
-    if not isinstance(model, MixtralForCausalLM):
+    if isinstance(model, MixtralForCausalLM):
+        model.model = llama_moe_v2_with_hidden_distribution_recording_for_alignment(model.model)  # 🔍 change the forward function
+        model.config.use_cache = False  # 🔍 set configuration
+        model.config.add_rescale_bias = True  # 🔍 set configuration
+    else:
         raise ValueError("For now the only supported model is MixtralForCausalLM!")
+
+    if model.config.moe_type != "modulelist":
+        raise ValueError("For now the only supported MoE type is modulelist!")
 
     num_hidden_layers = model.config.num_hidden_layers
     hidden_size = model.config.hidden_size
@@ -88,6 +94,10 @@ def main():
 
     with torch.no_grad():
         for target_layer in range(num_hidden_layers):
+            # check if is MoE
+            if not accelerator.unwrap_model(model).model.layers[target_layer].is_moe:
+                continue
+
             for target_module in ["attn", "mlp"] if use_attn_moe else ["mlp"]:
                 print(f"layer {target_layer} {target_module}")
 
@@ -144,11 +154,13 @@ def main():
                 print(f"scale magnitude: {scale_magnitude}")
 
                 # perform weight rescaling
+                layer = accelerator.unwrap_model(model).model.layers[target_layer]
+
                 if target_module == "attn":
                     for expert_idx, attention_expert in enumerate(layer.self_attn.o_proj):
                         old_bias = None if attention_expert.bias is None else attention_expert.bias.data.clone()
                         old_weight = attention_expert.weight.data.clone()
-                        attention_expert.bias = Parameter(scale_bias)
+                        attention_expert.bias = Parameter(scale_bias.clone())
                         attention_expert.weight *= scale_magnitude.unsqueeze(1)
                         print(f"attn expert {expert_idx} o_proj bias: {old_bias} -> {attention_expert.bias.data}")
                         print(f"attn expert {expert_idx} o_proj weight: {old_weight} -> {attention_expert.weight.data}")
@@ -157,7 +169,7 @@ def main():
                     for expert_idx, mlp_expert in enumerate(layer.block_sparse_moe.experts):
                         old_bias = None if mlp_expert.w2.bias is None else mlp_expert.w2.bias.data.clone()
                         old_weight = mlp_expert.w2.weight.data.clone()
-                        mlp_expert.w2.bias = Parameter(scale_bias)
+                        mlp_expert.w2.bias = Parameter(scale_bias.clone())
                         mlp_expert.w2.weight *= scale_magnitude.unsqueeze(1)
                         print(f"MLP expert {expert_idx} down_proj bias: {old_bias} -> {mlp_expert.w2.bias.data}")
                         print(f"MLP expert {expert_idx} down_proj weight: {old_weight} -> {mlp_expert.w2.weight.data}")
@@ -168,8 +180,25 @@ def main():
     # 🔍 save the aligned model
     if accelerator.is_main_process:
         create_dir(analysis_args.save_path)
+
+        # scale factor (just for recording, not used when loading model)
         torch.save(scale_factors, os.path.join(analysis_args.save_path, "scale_factors.pt"))
+
+        # model
         accelerator.unwrap_model(model).save_pretrained(analysis_args.save_path)
+
+        # tokenizer
+        tokenizer = dataloader.dataset.tokenizer
+        tokenizer.save_pretrained(analysis_args.save_path)
+
+        # code
+        current_path = os.path.dirname(__file__)
+        if isinstance(accelerator.unwrap_model(model), MixtralForCausalLM):
+            shutil.copy(os.path.join(current_path, "../../../models/mixtral/configuration_mixtral.py"), analysis_args.save_path)
+            shutil.copy(os.path.join(current_path, "../../../models/mixtral/modeling_mixtral.py"), analysis_args.save_path)
+        else:
+            warnings.warn(f"[WARN] unknown model type {type(accelerator.unwrap_model(model))}")
+
     accelerator.wait_for_everyone()
     accelerator.print("All done!")
 

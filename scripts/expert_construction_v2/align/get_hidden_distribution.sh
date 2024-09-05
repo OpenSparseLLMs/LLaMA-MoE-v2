@@ -59,16 +59,33 @@ export LOGLEVEL=INFO
 }
 
 {
+  #######################################################################################
+  # This part is for getting metrics of dense LLaMA models, which acts as the reference for the alignment algorithm.
+
   model_type="llama"
   folder_name="Meta-Llama-3-8B-Instruct"
   model_path="/mnt/petrelfs/share_data/quxiaoye/models/${folder_name}"
+
+  #######################################################################################
+  # This part is for validating the mean & variance of aligned models.
+
+  #  model_type="mixtral"
+  #  folder_name="split-gradient-max-ShareFalse-8MoE-Top2-Scale1.0-Dense0-Aligned"
+  #  folder_name="split-gradient-max-ShareFalse-8MoE-Top2-Scale1.0-Dense1-Aligned"
+  #  folder_name="split-gradient-max-ShareFalse-1Residual-7MoE-Top1-Scale1.0-Dense0-Aligned"
+  #  folder_name="split-gradient-max-ShareFalse-1Residual-7MoE-Top1-Scale1.0-Dense1-Aligned"
+  #  folder_name="split-gradient-max-ShareFalse-8MoE-Top2-Scale1.0-Dense0-AttnMoE-Top7-Scale1.0-Aligned"
+  #  folder_name="split-gradient-max-ShareFalse-1Residual-7MoE-Top1-Scale1.0-Dense0-AttnMoE-Top7-Scale1.0-Aligned"
+  #  model_path="/mnt/petrelfs/share_data/quxiaoye/llama_moe_v2/converted_models/${folder_name}"
+  #######################################################################################
+
   dataset_dir_or_path="/mnt/petrelfs/share_data/quxiaoye/llama_moe_v2/OpenHermes-2.5/openhermes2_5.jsonl"
 
   per_device_train_batch_size=4
-  max_steps=500 # the total number of samples shouldn't be too large, as the KMeans is of n^2 complexity
+  max_steps=500
   model_max_length=4096
 
-  echo "Maximum number of tokens for clustering: $((${num_gpu_per_node} * ${per_device_train_batch_size} * ${max_steps} * ${model_max_length})) (paddings are taken into account here)"
+  echo "Maximum number of possible tokens: $((${num_gpu_per_node} * ${per_device_train_batch_size} * ${max_steps} * ${model_max_length})) (paddings are taken into account here)"
 
   output_dir="/mnt/petrelfs/share_data/quxiaoye/llama_moe_v2/v2_mixtral_alignment"
   output_dir="${output_dir}/distribution"
@@ -93,5 +110,7 @@ export LOGLEVEL=INFO
     --overwrite_output_dir \
     --torch_dtype bfloat16 \
     --report_to none \
-    --save_path ${save_path}
+    --save_path ${save_path} \
+    --attn_implementation "eager"
+  #    --attn_implementation "flash_attention_2"
 }

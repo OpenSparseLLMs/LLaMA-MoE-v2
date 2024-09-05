@@ -14,10 +14,14 @@ from transformers import LlamaForCausalLM
 from smoe.entrypoint.expert_construction_v2.get_gates.hidden_feature_clustering import (
     prepare_model_and_data,
 )
+from smoe.models.mixtral import MixtralForCausalLM
 from smoe.utils.config import EnhancedTrainingArguments, ModelArguments, parse_args
 from smoe.utils.io import create_dir
 from smoe.utils.model_operation.modify_llama_model import (
     llama_with_hidden_distribution_recording,
+)
+from smoe.utils.model_operation.modify_llama_moe_v2_model import (
+    llama_moe_v2_with_hidden_distribution_recording,
 )
 
 logger = logging.getLogger(__name__)
@@ -46,11 +50,14 @@ def main():
     )
 
     model, dataloader = prepare_model_and_data(model_args, data_args, training_args)
-    model.model = llama_with_hidden_distribution_recording(model.model)  # 🔍 change the forward function
 
     # 🔍 model check & prepare configs
-    if not isinstance(model, LlamaForCausalLM):
-        raise ValueError("For now the only supported model is LLaMA!")
+    if isinstance(model, LlamaForCausalLM):
+        model.model = llama_with_hidden_distribution_recording(model.model)  # 🔍 change the forward function
+    elif isinstance(model, MixtralForCausalLM):
+        model.model = llama_moe_v2_with_hidden_distribution_recording(model.model)  # 🔍 change the forward function
+    else:
+        raise ValueError("For now the only supported model is LLaMA and LLaMA-MoE-v2!")
 
     num_hidden_layers = model.config.num_hidden_layers
     hidden_size = model.config.hidden_size

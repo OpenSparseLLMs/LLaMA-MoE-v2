@@ -18,18 +18,19 @@
 {
   model_path="/mnt/petrelfs/share_data/quxiaoye/models/Meta-Llama-3-8B-Instruct"
 
-  num_experts=16
-  top_k=8
+  num_experts=8
+  top_k=2
   scale_factor=1.0
+  num_moe_contract_layers=0
   moe_implementation_type="modulelist" #  modulelist megablocks scattermoe
 
   folder_name="${num_experts}experts-0.4jitter-l2"
   split_folder_name="split-gradient-max-ShareFalse-${num_experts}MoE"
+  save_folder_name="${split_folder_name}-Top${top_k}-Scale${scale_factor}-Dense${num_moe_contract_layers}"
 
-  save_path="/mnt/petrelfs/share_data/quxiaoye/llama_moe_v2/converted_models/${split_folder_name}-Top${top_k}-Scale${scale_factor}"
-  #  save_path="/mnt/petrelfs/share_data/quxiaoye/llama_moe_v2/v2_mixtral_gate/${folder_name}/models/${split_folder_name}-Top${top_k}-Scale${scale_factor}"
   neuron_indices_file="/mnt/petrelfs/share_data/quxiaoye/llama_moe_v2/v2_mixtral_gate/${folder_name}/results/${split_folder_name}/neuron_indices.pt"
   gate_weights_file="/mnt/petrelfs/share_data/quxiaoye/llama_moe_v2/v2_mixtral_gate/${folder_name}/results/gate_weights.pt"
+  save_path="/mnt/petrelfs/share_data/quxiaoye/llama_moe_v2/converted_models/${save_folder_name}"
 
   srun python smoe/entrypoint/expert_construction_v2/convert/convert_mixtral_v2.py \
     --model_path ${model_path} \
@@ -39,5 +40,6 @@
     --num_experts ${num_experts} \
     --top_k ${top_k} \
     --scale_factor ${scale_factor} \
+    --num_moe_contract_layers ${num_moe_contract_layers} \
     --moe_implementation_type ${moe_implementation_type}
 }

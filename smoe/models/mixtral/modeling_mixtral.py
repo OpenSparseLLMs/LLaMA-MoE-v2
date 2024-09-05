@@ -4,7 +4,7 @@ import inspect
 import math
 import warnings
 from dataclasses import dataclass
-from typing import Any, Callable, Dict, List, Optional, Tuple, Union
+from typing import Any, Callable, Dict, Iterable, List, Optional, Tuple, Union
 
 import scattermoe
 import stk
@@ -276,10 +276,10 @@ def load_balancing_loss_func(
     # ✨ Here is the fix for balance loss in Mixtral.
     # We should calculate the balance loss in a layer-wise manner otherwise it may lead to degenerated solutions.
     if use_layer_wise_balance:
-        if not isinstance(gate_logits, tuple):
+        if not isinstance(gate_logits, Iterable):
             gate_logits = (gate_logits,)
     else:
-        if isinstance(gate_logits, tuple):
+        if isinstance(gate_logits, Iterable):
             gate_logits = (torch.cat(gate_logits, dim=0),)
         else:
             gate_logits = (gate_logits,)
@@ -1386,11 +1386,9 @@ class MixtralFlashAttention2(MixtralAttention):
 
 
 class MixtralBLockSparseTop2MLP(nn.Module):
-    def __init__(
-        self, config: MixtralConfig, ffn_dim=None, add_rescale_bias=False
-    ):  # 🔍
+    def __init__(self, config: MixtralConfig, ffn_dim, add_rescale_bias=False):  # 🔍
         super().__init__()
-        self.ffn_dim = config.intermediate_size if ffn_dim is None else ffn_dim  # 🔍
+        self.ffn_dim = ffn_dim  # 🔍
         self.hidden_dim = config.hidden_size
 
         self.w1 = nn.Linear(self.hidden_dim, self.ffn_dim, bias=False)  # gate
@@ -1573,12 +1571,18 @@ class MixtralSparseMoeBlock(nn.Module):
             self.experts = nn.ModuleList(
                 [
                     MixtralBLockSparseTop2MLP(
-                        config, add_rescale_bias=config.add_rescale_bias
+                        config,
+                        config.intermediate_size,
+                        add_rescale_bias=config.add_rescale_bias,
                     )
                     for _ in range(self.num_experts)
                 ]  # 🔍
             )
         elif self.moe_type == "megablocks":
+            if config.add_rescale_bias:
+                raise NotImplementedError(
+                    "RescaleBias not yet supported with megablocks."
+                )
             is_fp16 = self.gate.weight.dtype == torch.float16
             is_bf16 = self.gate.weight.dtype == torch.bfloat16
             args = MegablocksArguments(
@@ -1596,6 +1600,10 @@ class MixtralSparseMoeBlock(nn.Module):
             )
             self.experts = SimplifiedParallelDroplessMLP(args)
         elif self.moe_type == "scattermoe":
+            if config.add_rescale_bias:
+                raise NotImplementedError(
+                    "RescaleBias not yet supported with scattermoe."
+                )
             self.experts = scattermoe.mlp.GLUMLP(
                 input_size=self.hidden_dim,
                 hidden_size=self.ffn_dim,
@@ -1681,33 +1689,39 @@ class MixtralDecoderLayer(nn.Module):
         self.hidden_size = config.hidden_size
 
         # 🔍
+        self.is_moe = (layer_idx >= config.num_moe_contract_layers) and (
+            layer_idx < config.num_hidden_layers - config.num_moe_contract_layers
+        )
         self.use_attn_moe = config.use_attn_moe
-        if config.use_attn_moe:
-            self.self_attn = MISTRAL_ATTENTION_MOE_CLASSES[config._attn_implementation](
-                config, layer_idx
+
+        if self.is_moe:
+            attn_class = (
+                MISTRAL_ATTENTION_MOE_CLASSES[config._attn_implementation]
+                if self.use_attn_moe
+                else MISTRAL_ATTENTION_CLASSES[config._attn_implementation]
             )
-        else:
-            self.self_attn = MISTRAL_ATTENTION_CLASSES[config._attn_implementation](
-                config, layer_idx
+            self.self_attn = attn_class(config, layer_idx)
+            self.block_sparse_moe = MixtralSparseMoeBlock(config)
+            self.mlp_residual = (
+                MixtralBLockSparseTop2MLP(config, config.intermediate_size_residual)
+                if config.intermediate_size_residual is not None
+                else None
             )
 
-        self.block_sparse_moe = MixtralSparseMoeBlock(config)
+        else:
+            attn_class = MISTRAL_ATTENTION_CLASSES[config._attn_implementation]
+            self.self_attn = attn_class(config, layer_idx)
+            self.block_sparse_moe = MixtralBLockSparseTop2MLP(
+                config, config.intermediate_size * config.num_local_experts
+            )
+            self.mlp_residual = None
+
         self.input_layernorm = MixtralRMSNorm(
             config.hidden_size, eps=config.rms_norm_eps
         )
         self.post_attention_layernorm = MixtralRMSNorm(
             config.hidden_size, eps=config.rms_norm_eps
         )
-
-        # 🔍
-        if config.intermediate_size_residual is None:
-            self.mlp_residual = None
-        else:
-            self.mlp_residual = MixtralBLockSparseTop2MLP(
-                config,
-                ffn_dim=config.intermediate_size_residual,
-                add_rescale_bias=False,
-            )
 
     def forward(
         self,
@@ -1748,7 +1762,7 @@ class MixtralDecoderLayer(nn.Module):
         hidden_states = self.input_layernorm(hidden_states)
 
         # 🔍 Self Attention
-        if self.use_attn_moe:
+        if self.is_moe and self.use_attn_moe:
             (
                 hidden_states,
                 self_attn_weights,
@@ -1778,7 +1792,14 @@ class MixtralDecoderLayer(nn.Module):
         # Fully Connected
         residual = hidden_states
         hidden_states = self.post_attention_layernorm(hidden_states)
-        hidden_states, router_logits = self.block_sparse_moe(hidden_states)
+
+        # 🔍
+        if self.is_moe:
+            hidden_states, router_logits = self.block_sparse_moe(hidden_states)
+        else:
+            hidden_states = self.block_sparse_moe(hidden_states)
+            router_logits = None
+
         if self.mlp_residual is not None:
             hidden_states += self.mlp_residual(hidden_states)  # 🔍
         hidden_states = residual + hidden_states
@@ -2165,8 +2186,14 @@ class MixtralForCausalLM(MixtralPreTrainedModel):
 
         aux_loss = None
         if output_router_logits:
+            valid_router_logits = tuple(
+                logits
+                for logits in (outputs.router_logits if return_dict else outputs[-2])
+                if logits is not None
+            )
+
             aux_loss = load_balancing_loss_func(
-                outputs.router_logits if return_dict else outputs[-2],
+                valid_router_logits,
                 self.num_experts,
                 self.num_experts_per_tok,
                 use_layer_wise_balance=self.config.use_layer_wise_balance,  # ✨

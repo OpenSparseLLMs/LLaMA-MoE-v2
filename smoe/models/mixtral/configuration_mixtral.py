@@ -163,10 +163,11 @@ class MixtralConfig(PretrainedConfig):
         attention_dropout=0.0,
         num_experts_per_tok=2,
         num_local_experts=8,
-        scale_factor: float = 1.0,
+        scale_factor: float = 1.0,  # 🔍
         output_router_logits=False,
         router_aux_loss_coef=0.001,
-        moe_type: str = "modulelist",
+        moe_type: str = "modulelist",  # 🔍
+        num_moe_contract_layers: int = 0,  # 🔍 the number of layers that are not converted into MoE at each side of the model
         use_attn_moe: bool = False,  # 🔍
         top_k_attn: int = None,  # 🔍
         scale_factor_attn: float = None,  # 🔍
@@ -182,8 +183,6 @@ class MixtralConfig(PretrainedConfig):
         self.num_hidden_layers = num_hidden_layers
         self.num_attention_heads = num_attention_heads
         self.sliding_window = sliding_window
-
-        self.moe_type = moe_type
 
         # for backward compatibility
         if num_key_value_heads is None:
@@ -202,6 +201,8 @@ class MixtralConfig(PretrainedConfig):
         self.scale_factor = scale_factor  # 🔍
         self.output_router_logits = output_router_logits
         self.router_aux_loss_coef = router_aux_loss_coef
+        self.moe_type = moe_type  # 🔍
+        self.num_moe_contract_layers = num_moe_contract_layers  # 🔍
 
         # 🔍 for Attention MoE
         self.use_attn_moe = use_attn_moe

@@ -10,13 +10,13 @@
 #SBATCH --mem=0
 
 #SBATCH --nodes=1
-#SBATCH --gres=gpu:4
-#SBATCH --quotatype=reserved
+#SBATCH --gres=gpu:2
+#SBATCH --quotatype=auto
 
 # reserved spot auto
 
 num_nodes=1        # should match with --nodes
-num_gpu_per_node=4 # should match with --gres
+num_gpu_per_node=2 # should match with --gres
 export OMP_NUM_THREADS=4
 export LOGLEVEL=INFO
 
@@ -65,22 +65,19 @@ export LOGLEVEL=INFO
   seed=114514
   per_device_train_batch_size=1
   model_max_length=4096
-  max_steps=256
+  max_steps=1024
 
-#  folder_name="3experts-0.4jitter-l2"
+  folder_name="3experts-0.4jitter-l2"
 #  folder_name="4experts-0.4jitter-l2"
-
 #  folder_name="6experts-0.4jitter-l2"
 #  folder_name="7experts-0.4jitter-l2"
 #  folder_name="8experts-0.4jitter-l2"
-
 #  folder_name="12experts-0.4jitter-l2"
 #  folder_name="14experts-0.4jitter-l2"
 #  folder_name="16experts-0.4jitter-l2"
-
 #  folder_name="24experts-0.4jitter-l2"
 #  folder_name="28experts-0.4jitter-l2"
-  folder_name="32experts-0.4jitter-l2"
+#  folder_name="32experts-0.4jitter-l2"
 
   gate_weights_file="/mnt/petrelfs/share_data/quxiaoye/llama_moe_v2/v2_mixtral_gate/${folder_name}/results/gate_weights.pt"
   output_dir="/mnt/petrelfs/share_data/quxiaoye/llama_moe_v2/v2_mixtral_gate/${folder_name}"

@@ -169,8 +169,8 @@ def forward_llama_decoder_with_hidden_states_distribution_recording(
      ) / (old_num + this_num)
 
     print(f'({hidden_states.device}) (Layer {self.layer_idx}) Attn Number: {old_num} -> {self.attn_distribution["number"]}')
-    print(f'({hidden_states.device}) (Layer {self.layer_idx}) Attn Mean: {old_mean} -> {self.attn_distribution["mean"]}')
-    print(f'({hidden_states.device}) (Layer {self.layer_idx}) Attn Variance: {old_var} -> {self.attn_distribution["variance"]}')
+    print(f'({hidden_states.device}) (Layer {self.layer_idx}) Attn Mean: {old_mean[:8]} -> {self.attn_distribution["mean"][:8]}')
+    print(f'({hidden_states.device}) (Layer {self.layer_idx}) Attn Variance: {old_var[:8]} -> {self.attn_distribution["variance"][:8]}')
     ##########################################################
 
     hidden_states = residual + hidden_states
@@ -201,8 +201,8 @@ def forward_llama_decoder_with_hidden_states_distribution_recording(
     ) / (old_num + this_num)
 
     print(f'({hidden_states.device}) (Layer {self.layer_idx}) MLP Number: {old_num} -> {self.mlp_distribution["number"]}')
-    print(f'({hidden_states.device}) (Layer {self.layer_idx}) MLP Mean: {old_mean} -> {self.mlp_distribution["mean"]}')
-    print(f'({hidden_states.device}) (Layer {self.layer_idx}) MLP Variance: {old_var} -> {self.mlp_distribution["variance"]}')
+    print(f'({hidden_states.device}) (Layer {self.layer_idx}) MLP Mean: {old_mean[:8]} -> {self.mlp_distribution["mean"][:8]}')
+    print(f'({hidden_states.device}) (Layer {self.layer_idx}) MLP Variance: {old_var[:8]} -> {self.mlp_distribution["variance"][:8]}')
     ###########################################################
 
     hidden_states = residual + hidden_states

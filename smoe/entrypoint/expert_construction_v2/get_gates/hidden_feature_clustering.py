@@ -134,7 +134,7 @@ def prepare_model_and_data(model_args, data_args, training_args):
         "cache_dir": model_args.cache_dir,
         "revision": model_args.model_revision,
         "use_auth_token": True if model_args.use_auth_token else None,
-        "attn_implementation": "flash_attention_2"  # NOTE THIS
+        "attn_implementation": model_args.attn_implementation,
     }
 
     if model_args.config_name:

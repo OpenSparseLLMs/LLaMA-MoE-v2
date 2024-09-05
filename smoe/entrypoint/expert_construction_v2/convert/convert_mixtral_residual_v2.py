@@ -16,7 +16,8 @@ if __name__ == "__main__":
 
     parser.add_argument('--num_experts', type=int, default=None)
     parser.add_argument('--top_k', type=int, default=None)
-    parser.add_argument('--scale_factor', type=float, default=None)
+    parser.add_argument('--scale_factor', type=float, default=1.0)
+    parser.add_argument('--num_moe_contract_layers', type=int, default=0)
     parser.add_argument('--moe_implementation_type', type=str, default='modulelist', choices=["modulelist", "megablocks", "scattermoe"])
 
     args = parser.parse_args()
@@ -34,6 +35,7 @@ if __name__ == "__main__":
         intermediate_size_residual=intermediate_size_residual,
         top_k=args.top_k,
         scale_factor=args.scale_factor,
+        num_moe_contract_layers=args.num_moe_contract_layers,
         moe_type=args.moe_implementation_type,
         neuron_indices=neuron_indices,
         gate_weights=None if args.gate_weights_file is None else torch.load(args.gate_weights_file),

@@ -158,6 +158,9 @@ class ModelArguments:
             "help": "The weight of the balance loss for the gate, should be a float"
         },
     )
+    attn_implementation: str = field(
+        default="flash_attention_2",
+    )
 
     def __post_init__(self):
         if self.config_overrides is not None and (

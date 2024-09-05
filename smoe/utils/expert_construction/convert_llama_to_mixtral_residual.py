@@ -27,7 +27,8 @@ def convert_residual_safetensors(
     intermediate_size: int,  # 🔍
     intermediate_size_residual: int,  # 🔍
     top_k: int,
-    scale_factor: int = 1.0,
+    scale_factor: float = 1.0,
+    num_moe_contract_layers: int = 0,
     moe_type: str = "modulelist",
     neuron_indices: dict = None,
     gate_weights: dict = None,
@@ -54,6 +55,7 @@ def convert_residual_safetensors(
                 config.router_aux_loss_coef = 1e-2
                 config.scale_factor = scale_factor
                 config.moe_type = moe_type
+                config.num_moe_contract_layers = num_moe_contract_layers
                 config.intermediate_size = intermediate_size  # 🔍
                 config.intermediate_size_residual = intermediate_size_residual  # 🔍
                 config.auto_map = {
@@ -93,88 +95,93 @@ def convert_residual_safetensors(
                     ).groups()
                     layer_idx = int(layer_idx)
 
-                    contained_layers.add(layer_idx)
+                    is_moe = (layer_idx >= num_moe_contract_layers) and (layer_idx < config.num_hidden_layers - num_moe_contract_layers)
 
-                    if ffn_type == "down":
-                        hsz, mid = tensor.shape
-                        mid_idx = 1
-                    else:
-                        mid, hsz = tensor.shape
-                        mid_idx = 0
+                    if is_moe:
+                        contained_layers.add(layer_idx)
 
-                    # initialize gate weights
-                    if layer_idx not in router_records:
-                        if gate_weights is None:  # use newly initialized gate weights
-                            gate_weight = torch.zeros(num_experts, hsz)
-                            init.kaiming_uniform_(gate_weight, a=math.sqrt(5))
-                            tensors[
-                                f"model.layers.{layer_idx}.block_sparse_moe.gate.weight"
-                            ] = gate_weight
-                        else:  # use provided gate weights
-                            print(f"Initializing layer {layer_idx} gate weights using {gate_weights[layer_idx]}...")
-                            tensors[
-                                f"model.layers.{layer_idx}.block_sparse_moe.gate.weight"
-                            ] = gate_weights[layer_idx][:num_experts].clone()  # 🔍 limit the weight num
-                        router_records.add(layer_idx)
-                    new_ffn_type = ffn_type_map[ffn_type]
-
-                    # initialize expert weights
-                    this_layer_indices: dict = neuron_indices[layer_idx]  # 🔍
-
-                    # 🔍 add residual weights
-                    print(f"Initializing layer {layer_idx} residual expert {ffn_type} using neurons with indices {this_layer_indices['residual']}...")
-                    if mid_idx == 0:
-                        expert_tensor = tensor[this_layer_indices['residual']].clone()
-                    else:
-                        expert_tensor = tensor[:, this_layer_indices['residual']].clone()
-                    tensors[f"model.layers.{layer_idx}.mlp_residual.{new_ffn_type}.weight"] = expert_tensor
-
-                    # add moe weights
-                    if moe_type == "megablocks":
-                        states_dict_name = f"model.layers.{layer_idx}.block_sparse_moe.experts.mlp.{new_ffn_type}"
-                        if mid_idx == 1:
-                            tensor = tensor.view(mid, hsz)
-                        expert_size = mid // num_experts
-                        tensors[states_dict_name] = torch.zeros_like(tensor)
-                        for expert_idx in range(num_experts):
-                            print(f"Initializing layer {layer_idx} expert {expert_idx} {ffn_type} using neurons with indices {this_layer_indices[expert_idx]}...")
-                            tensors[states_dict_name][expert_idx * expert_size: (expert_idx + 1) * expert_size] = tensor[this_layer_indices[expert_idx]].clone()
-
-                    elif moe_type == "modulelist":
-                        for expert_idx in range(num_experts):
-                            print(f"Initializing layer {layer_idx} expert {expert_idx} {ffn_type} using neurons with indices {this_layer_indices[expert_idx]}...")
-                            if mid_idx == 0:
-                                expert_tensor = tensor[this_layer_indices[expert_idx]].clone()
-                            else:
-                                expert_tensor = tensor[:, this_layer_indices[expert_idx]].clone()
-                            tensors[
-                                f"model.layers.{layer_idx}.block_sparse_moe.experts.{expert_idx}.{new_ffn_type}.weight"
-                            ] = expert_tensor
-
-                    elif moe_type == "scattermoe":
-                        if mid_idx == 1:
-                            tensor = tensor.view(mid, hsz)
-
-                        expert_size = mid // num_experts
-                        temp_tensor = torch.zeros((num_experts, expert_size, hsz), device=tensor.device, dtype=tensor.dtype)
-                        for expert_idx in range(num_experts):
-                            print(f"Initializing layer {layer_idx} expert {expert_idx} {ffn_type} using neurons with indices {this_layer_indices[expert_idx]}...")
-                            temp_tensor[expert_idx] = tensor[this_layer_indices[expert_idx]].clone()
-                        tensor = temp_tensor
-
-                        if new_ffn_type == "output_experts":
-                            tensors[
-                                f"model.layers.{layer_idx}.block_sparse_moe.experts.{new_ffn_type}.weight"
-                            ] = tensor.permute(0, 2, 1)
-                        elif new_ffn_type == "experts#1":
-                            scattermoe_upgate_tensors[layer_idx][0] = tensor
-                        elif new_ffn_type == "experts#2":
-                            scattermoe_upgate_tensors[layer_idx][1] = tensor
+                        if ffn_type == "down":
+                            hsz, mid = tensor.shape
+                            mid_idx = 1
                         else:
-                            raise KeyError
-                    else:
-                        raise NotImplementedError
+                            mid, hsz = tensor.shape
+                            mid_idx = 0
 
+                        # initialize gate weights
+                        if layer_idx not in router_records:
+                            if gate_weights is None:  # use newly initialized gate weights
+                                gate_weight = torch.zeros(num_experts, hsz)
+                                init.kaiming_uniform_(gate_weight, a=math.sqrt(5))
+                                tensors[
+                                    f"model.layers.{layer_idx}.block_sparse_moe.gate.weight"
+                                ] = gate_weight
+                            else:  # use provided gate weights
+                                print(f"Initializing layer {layer_idx} gate weights using {gate_weights[layer_idx]}...")
+                                tensors[
+                                    f"model.layers.{layer_idx}.block_sparse_moe.gate.weight"
+                                ] = gate_weights[layer_idx][:num_experts].clone()  # 🔍 limit the weight num
+                            router_records.add(layer_idx)
+                        new_ffn_type = ffn_type_map[ffn_type]
+
+                        # initialize expert weights
+                        this_layer_indices: dict = neuron_indices[layer_idx]  # 🔍
+
+                        # 🔍 add residual weights
+                        print(f"Initializing layer {layer_idx} residual expert {ffn_type} using neurons with indices {this_layer_indices['residual']}...")
+                        if mid_idx == 0:
+                            expert_tensor = tensor[this_layer_indices['residual']].clone()
+                        else:
+                            expert_tensor = tensor[:, this_layer_indices['residual']].clone()
+                        tensors[f"model.layers.{layer_idx}.mlp_residual.{new_ffn_type}.weight"] = expert_tensor
+
+                        # add moe weights
+                        if moe_type == "megablocks":
+                            states_dict_name = f"model.layers.{layer_idx}.block_sparse_moe.experts.mlp.{new_ffn_type}"
+                            if mid_idx == 1:
+                                tensor = tensor.view(mid, hsz)
+                            expert_size = mid // num_experts
+                            tensors[states_dict_name] = torch.zeros_like(tensor)
+                            for expert_idx in range(num_experts):
+                                print(f"Initializing layer {layer_idx} expert {expert_idx} {ffn_type} using neurons with indices {this_layer_indices[expert_idx]}...")
+                                tensors[states_dict_name][expert_idx * expert_size: (expert_idx + 1) * expert_size] = tensor[this_layer_indices[expert_idx]].clone()
+
+                        elif moe_type == "modulelist":
+                            for expert_idx in range(num_experts):
+                                print(f"Initializing layer {layer_idx} expert {expert_idx} {ffn_type} using neurons with indices {this_layer_indices[expert_idx]}...")
+                                if mid_idx == 0:
+                                    expert_tensor = tensor[this_layer_indices[expert_idx]].clone()
+                                else:
+                                    expert_tensor = tensor[:, this_layer_indices[expert_idx]].clone()
+                                tensors[
+                                    f"model.layers.{layer_idx}.block_sparse_moe.experts.{expert_idx}.{new_ffn_type}.weight"
+                                ] = expert_tensor
+
+                        elif moe_type == "scattermoe":
+                            if mid_idx == 1:
+                                tensor = tensor.view(mid, hsz)
+
+                            expert_size = mid // num_experts
+                            temp_tensor = torch.zeros((num_experts, expert_size, hsz), device=tensor.device, dtype=tensor.dtype)
+                            for expert_idx in range(num_experts):
+                                print(f"Initializing layer {layer_idx} expert {expert_idx} {ffn_type} using neurons with indices {this_layer_indices[expert_idx]}...")
+                                temp_tensor[expert_idx] = tensor[this_layer_indices[expert_idx]].clone()
+                            tensor = temp_tensor
+
+                            if new_ffn_type == "output_experts":
+                                tensors[
+                                    f"model.layers.{layer_idx}.block_sparse_moe.experts.{new_ffn_type}.weight"
+                                ] = tensor.permute(0, 2, 1)
+                            elif new_ffn_type == "experts#1":
+                                scattermoe_upgate_tensors[layer_idx][0] = tensor
+                            elif new_ffn_type == "experts#2":
+                                scattermoe_upgate_tensors[layer_idx][1] = tensor
+                            else:
+                                raise KeyError
+                        else:
+                            raise NotImplementedError
+
+                    else:
+                        tensors[key] = tensor
                 else:
                     tensors[key] = tensor
 

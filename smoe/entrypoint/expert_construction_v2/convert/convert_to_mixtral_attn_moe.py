@@ -43,11 +43,12 @@ if __name__ == "__main__":
     model_attn_moe.load_state_dict(model.state_dict(), strict=False)
 
     for i, layer in enumerate(model_attn_moe.model.layers):
-        layer.self_attn = MISTRAL_ATTENTION_MOE_CLASSES[config._attn_implementation].from_vanilla_attention(
-            model.model.layers[i].self_attn,
-            config.top_k_attn,
-            config.scale_factor_attn,
-        )
+        if layer.is_moe:
+            layer.self_attn = MISTRAL_ATTENTION_MOE_CLASSES[config._attn_implementation].from_vanilla_attention(
+                model.model.layers[i].self_attn,
+                config.top_k_attn,
+                config.scale_factor_attn,
+            )
 
     # save
     model_attn_moe.save_pretrained(args.save_path)
