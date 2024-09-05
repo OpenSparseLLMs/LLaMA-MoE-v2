@@ -198,3 +198,21 @@ class Llama3ConversationTemplate(Conversation):
             conv.append_message(turn["from"], turn["value"])
         # return conv.get_prompt(add_eos=add_eos)
         return conv.get_new_prompt(add_eos=add_eos)
+        
+    @classmethod
+    def parse_list(
+        cls, messages_list: list[dict], skip_system: bool = False, add_eos: bool = False
+    ) -> str:
+        conv = cls()
+        prompt_list, source_part_list = [],[]
+        for messages in messages_list:
+            conv.clear_msg()
+            for j, turn in enumerate(messages):
+                if skip_system and turn["from"] == "system":
+                    continue
+                conv.append_message(turn["from"], turn["value"])
+            prompt, source_part = conv.get_new_prompt(add_eos=add_eos)
+            prompt_list.append(prompt)
+            source_part_list.append(source_part)
+        # return conv.get_prompt(add_eos=add_eos)
+        return prompt_list, source_part_list
