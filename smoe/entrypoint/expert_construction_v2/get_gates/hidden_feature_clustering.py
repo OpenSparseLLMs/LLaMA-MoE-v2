@@ -30,9 +30,11 @@ from transformers import (
 from transformers.models.llama.modeling_llama import LlamaMLP
 from transformers.trainer_utils import seed_worker
 
-from smoe.data.collate_fn import fault_tolerance_data_collator
 from smoe.entrypoint.cpt.cpt_fpt import MODEL_MAP
-from smoe.entrypoint.sft.train_sft_llama3 import CachedJsonlDataset
+from smoe.entrypoint.sft.train_sft_llama3 import (
+    CachedJsonlDataset,
+    simple_fault_tolerance_data_collator,
+)
 from smoe.models.llama_moe.modeling_llama_moe import LlamaMoEForCausalLM
 from smoe.models.llama_moe_residual import LlamaMoEResidualForCausalLM
 from smoe.models.mixtral.modeling_mixtral import MixtralForCausalLM
@@ -132,7 +134,7 @@ def prepare_model_and_data(model_args, data_args, training_args):
         "cache_dir": model_args.cache_dir,
         "revision": model_args.model_revision,
         "use_auth_token": True if model_args.use_auth_token else None,
-        "attn_implementation": "flash_attention_2"  # NOTE THIS
+        "attn_implementation": model_args.attn_implementation,
     }
 
     if model_args.config_name:
@@ -245,7 +247,7 @@ def prepare_model_and_data(model_args, data_args, training_args):
     # 🔍 prepare data loader
     dataloader_params = {
         "batch_size": training_args.per_device_train_batch_size,
-        "collate_fn": fault_tolerance_data_collator,
+        "collate_fn": simple_fault_tolerance_data_collator,
         "num_workers": 0,
         "pin_memory": True,
     }
@@ -274,7 +276,7 @@ def main():
     num_hidden_layers = model.config.num_hidden_layers
     hidden_size = model.config.hidden_size
 
-    assert hidden_size % clustering_args.num_experts == 0
+    # assert hidden_size % clustering_args.num_experts == 0
     balance_jitter_factor = max(0.0, clustering_args.balance_jitter_factor)
 
     # 🔍 prepare accelerator

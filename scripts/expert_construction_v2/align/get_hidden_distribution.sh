@@ -1,22 +1,23 @@
 #!/usr/bin/bash
 
-#SBATCH --job-name=get_grads
-#SBATCH --output=logs_split/%x-%j.log
-#SBATCH --error=logs_split/%x-%j.log
+#SBATCH --job-name=distribution
+#SBATCH --output=logs_align/%x-%j.log
+#SBATCH --error=logs_align/%x-%j.log
 
 #SBATCH --partition=MoE
 #SBATCH --ntasks-per-node=1
-#SBATCH --cpus-per-task=32
+#SBATCH --cpus-per-task=16
 #SBATCH --mem=0
 
 #SBATCH --nodes=1
-#SBATCH --gres=gpu:2
+#SBATCH --gres=gpu:1
 #SBATCH --quotatype=auto
 
 # reserved spot auto
 
 num_nodes=1        # should match with --nodes
-num_gpu_per_node=2 # should match with --gres
+num_cpus=16        # should match with --cpus-per-task
+num_gpu_per_node=1 # should match with --gres
 export OMP_NUM_THREADS=4
 export LOGLEVEL=INFO
 
@@ -58,30 +59,37 @@ export LOGLEVEL=INFO
 }
 
 {
+  #######################################################################################
+  # This part is for getting metrics of dense LLaMA models, which acts as the reference for the alignment algorithm.
+
   model_type="llama"
-  model_path="/mnt/petrelfs/share_data/quxiaoye/models/Meta-Llama-3-8B-Instruct"
+  folder_name="Meta-Llama-3-8B-Instruct"
+  model_path="/mnt/petrelfs/share_data/quxiaoye/models/${folder_name}"
+
+  #######################################################################################
+  # This part is for validating the mean & variance of aligned models.
+
+  #  model_type="mixtral"
+  #  folder_name="split-gradient-max-ShareFalse-8MoE-Top2-Scale1.0-Dense0-Aligned"
+  #  folder_name="split-gradient-max-ShareFalse-8MoE-Top2-Scale1.0-Dense1-Aligned"
+  #  folder_name="split-gradient-max-ShareFalse-1Residual-7MoE-Top1-Scale1.0-Dense0-Aligned"
+  #  folder_name="split-gradient-max-ShareFalse-1Residual-7MoE-Top1-Scale1.0-Dense1-Aligned"
+  #  folder_name="split-gradient-max-ShareFalse-8MoE-Top2-Scale1.0-Dense0-AttnMoE-Top7-Scale1.0-Aligned"
+  #  folder_name="split-gradient-max-ShareFalse-1Residual-7MoE-Top1-Scale1.0-Dense0-AttnMoE-Top7-Scale1.0-Aligned"
+  #  model_path="/mnt/petrelfs/share_data/quxiaoye/llama_moe_v2/converted_models/${folder_name}"
+  #######################################################################################
+
   dataset_dir_or_path="/mnt/petrelfs/share_data/quxiaoye/llama_moe_v2/OpenHermes-2.5/openhermes2_5.jsonl"
 
-  seed=114514
-  per_device_train_batch_size=1
+  per_device_train_batch_size=4
+  max_steps=500
   model_max_length=4096
-  max_steps=1024
 
-  folder_name="3experts-0.4jitter-l2"
-#  folder_name="4experts-0.4jitter-l2"
-#  folder_name="6experts-0.4jitter-l2"
-#  folder_name="7experts-0.4jitter-l2"
-#  folder_name="8experts-0.4jitter-l2"
-#  folder_name="12experts-0.4jitter-l2"
-#  folder_name="14experts-0.4jitter-l2"
-#  folder_name="16experts-0.4jitter-l2"
-#  folder_name="24experts-0.4jitter-l2"
-#  folder_name="28experts-0.4jitter-l2"
-#  folder_name="32experts-0.4jitter-l2"
+  echo "Maximum number of possible tokens: $((${num_gpu_per_node} * ${per_device_train_batch_size} * ${max_steps} * ${model_max_length})) (paddings are taken into account here)"
 
-  gate_weights_file="/mnt/petrelfs/share_data/quxiaoye/llama_moe_v2/v2_mixtral_gate/${folder_name}/results/gate_weights.pt"
-  output_dir="/mnt/petrelfs/share_data/quxiaoye/llama_moe_v2/v2_mixtral_gate/${folder_name}"
-  save_path="${output_dir}/results"
+  output_dir="/mnt/petrelfs/share_data/quxiaoye/llama_moe_v2/v2_mixtral_alignment"
+  output_dir="${output_dir}/distribution"
+  save_path="${output_dir}/${folder_name}"
 
   srun torchrun \
     --nnodes ${num_nodes} \
@@ -90,12 +98,11 @@ export LOGLEVEL=INFO
     --rdzv_id $RANDOM \
     --rdzv_backend c10d \
     --rdzv_endpoint $head_node:$port \
-    smoe/entrypoint/expert_construction_v2/split/split_gradient_get_grads_v2.py \
+    smoe/entrypoint/expert_construction_v2/align/get_hidden_distribution.py \
     --model_name_or_path ${model_path} \
     --model_type ${model_type} \
     --dataset_dir_or_path ${dataset_dir_or_path} \
     --per_device_train_batch_size ${per_device_train_batch_size} \
-    --seed ${seed} \
     --bf16 \
     --max_steps ${max_steps} \
     --model_max_length ${model_max_length} \
@@ -103,6 +110,7 @@ export LOGLEVEL=INFO
     --overwrite_output_dir \
     --torch_dtype bfloat16 \
     --report_to none \
-    --gate_weights_file ${gate_weights_file} \
-    --save_path ${save_path}
+    --save_path ${save_path} \
+    --attn_implementation "eager"
+  #    --attn_implementation "flash_attention_2"
 }

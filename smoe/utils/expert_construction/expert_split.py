@@ -447,7 +447,12 @@ class GradientSplit(LayerSplit):
         assert expert_size <= self.neuron_num
         if not share_neurons:
             # print("***", expert_size, expert_num, self.neuron_num)
-            assert expert_size * expert_num == self.neuron_num
+            if expert_size * expert_num != self.neuron_num:
+                raise ValueError(
+                    f'The number of neurons must be exactly divided by the number of experts for non-shared split!\n'
+                    f'Now the number of neurons is {self.neuron_num}, but the number of experts is {expert_num} and each expert has {expert_size} neurons.\n'
+                    f'The total number of neurons in all experts {expert_num * expert_size} != {self.neuron_num}.'
+                )
             self.split_without_neuron_sharing(expert_num, expert_size, criterion)
         else:
             self.split_with_neuron_sharing(expert_num, expert_size, criterion)

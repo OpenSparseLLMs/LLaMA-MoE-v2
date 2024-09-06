@@ -68,16 +68,20 @@ export LOGLEVEL=INFO
   max_steps=10 # the total number of samples shouldn't be too large, as the KMeans is of n^2 complexity
   model_max_length=4096
 
-  echo "Maximum number of tokens for clustering: $((${num_gpu_per_node} * ${per_device_train_batch_size} * ${max_steps} * ${model_max_length})) (paddings are taken into account here)"
+  echo "Maximum number of possible tokens: $((${num_gpu_per_node} * ${per_device_train_batch_size} * ${max_steps} * ${model_max_length})) (paddings are taken into account here)"
 
-  num_experts=16
-  balance_jitter_factor=0.0 # hyper-parameter for adjusting the cluster size, will affect the initialization of gate weights. (0.0 for strictly balanced, however the performance may be worse.)
-  distance_metric="cos"      # l2 cos
+  # 3 4
+  # 6 7 8
+  # 12 14 16
+  # 24 28 32
+  num_experts=32
+  balance_jitter_factor=0.4 # hyper-parameter for adjusting the cluster size, will affect the initialization of gate weights. (0.0 for strictly balanced, however the performance may be worse.)
+  distance_metric="l2"      # l2 cos
   max_iter=100
   random_state=114514
   n_jobs=${num_cpus} # how many different runs will be applied to each clustering process to get a better solution
 
-  output_dir="/mnt/petrelfs/dongdaize.d/workspace/llama-moe-v2/outputs/v2_mixtral_gate"
+  output_dir="/mnt/petrelfs/share_data/quxiaoye/llama_moe_v2/v2_mixtral_gate"
   output_dir="${output_dir}/${num_experts}experts-${balance_jitter_factor}jitter-${distance_metric}"
   save_path="${output_dir}/results"
 

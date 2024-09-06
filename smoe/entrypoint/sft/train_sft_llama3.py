@@ -13,12 +13,6 @@ from transformers import PreTrainedTokenizer, Trainer
 from transformers.trainer_pt_utils import LabelSmoother
 
 from smoe.models.mixtral import MixtralConfig, MixtralForCausalLM
-from smoe.models.mixtral_residual.configuration_mixtral_residual import (
-    MixtralResidualConfig,
-)
-from smoe.models.mixtral_residual.modeling_mixtral_residual import (
-    MixtralResidualForCausalLM,
-)
 from smoe.utils.conversation import Llama3ConversationTemplate
 from smoe.utils.io import load_json, load_jsonlines
 
@@ -115,28 +109,86 @@ def preprocess(
     tokenizer: transformers.PreTrainedTokenizer,
 ) -> Dict:
     # Apply prompt templates
-    conversations = []
-    for i, ins in enumerate(instances):
-        prompt = Llama3ConversationTemplate.parse(ins["conversations"])
-        conversations.append(prompt)
+
+    prompt, source_part = Llama3ConversationTemplate.parse(
+        instances["conversations"], skip_system=True
+    )
 
     # Tokenize conversations
-    res = tokenizer(
-        conversations,
+    res_conv = tokenizer(
+        prompt,
         return_tensors="pt",
-        padding="max_length",
+        padding=False,
         max_length=tokenizer.model_max_length,
         truncation=True,
     )
-    input_ids = res["input_ids"]
-    attention_masks = res["attention_mask"]
-    targets = input_ids.clone()
+
+    input_ids = res_conv["input_ids"]
+    import copy
+
+    targets = copy.deepcopy(input_ids)
+
+    res_source = tokenizer(
+        source_part,
+        return_tensors="pt",
+        padding=False,
+        max_length=tokenizer.model_max_length,
+        truncation=True,
+    )
+
+    source_length = res_source["input_ids"].shape[1]
+
+    targets[0][
+        :source_length
+    ] = -100  # ignore loss for source part, the target is two dimensional tensor
+
+    attention_masks = torch.tensor(
+        [[0 if input_id_seq == -100 else 1 for input_id_seq in input_ids[0]]]
+    )
 
     return dict(
         input_ids=input_ids,
         labels=targets,
         attention_mask=attention_masks,
     )
+
+
+def simple_fault_tolerance_data_collator(features: list) -> dict[str, Any]:
+    batch = {}
+    first = features[0]
+    assert all(key in first for key in ["input_ids", "labels", "attention_mask"])
+    max_len = max([len(feature["input_ids"]) for feature in features])
+    for feature in features:
+        # Simple for llama3, we directly use '<|eot_id|>' (128009) for pad token. You should change for other models.
+        feature["input_ids"] = torch.cat(
+            [
+                feature["input_ids"],
+                torch.tensor(
+                    [128009] * (max_len - len(feature["input_ids"])), dtype=torch.long
+                ),
+            ]
+        )
+        feature["labels"] = torch.cat(
+            [
+                feature["labels"],
+                torch.tensor(
+                    [-100] * (max_len - len(feature["labels"])), dtype=torch.long
+                ),
+            ]
+        )
+        feature["attention_mask"] = torch.cat(
+            [
+                feature["attention_mask"],
+                torch.tensor(
+                    [0] * (max_len - len(feature["attention_mask"])), dtype=torch.long
+                ),
+            ]
+        )
+
+    for k, v in first.items():
+        batch[k] = torch.stack([f[k] for f in features])
+
+    return batch
 
 
 def fault_tolerance_data_collator(features: list) -> dict[str, Any]:
@@ -222,7 +274,7 @@ class CachedJsonlDataset(Dataset):
 
     def __getitem__(self, index):
         ins = self.data[index]
-        processed = preprocess([ins], self.tokenizer)
+        processed = preprocess(ins, self.tokenizer)
         ins = {}
         for key in processed:
             ins[key] = processed[key][0]
@@ -278,9 +330,6 @@ def get_model(
     elif model_type == "v2_mixtral":
         ConfigClass = MixtralConfig
         ModelClass = MixtralForCausalLM
-    elif model_type == "v2_mixtral_residual":
-        ConfigClass = MixtralResidualConfig
-        ModelClass = MixtralResidualForCausalLM
     else:
         raise ValueError(f"Unknown model type: {model_type}")
 
@@ -411,7 +460,9 @@ def train():
         tokenizer=tokenizer,
         args=training_args,
         train_dataset=train_dataset,
-        data_collator=fault_tolerance_data_collator,
+        data_collator=simple_fault_tolerance_data_collator,
+        # data_collator=fault_tolerance_data_collator,
+        # num_processes=1 # for flash_attention_2
     )
     logger.info("trainer ready")
 
@@ -427,7 +478,7 @@ def train():
     if training_args.save_final_ckpt:
         logger.info("training finished, dumping model")
         model.config.use_cache = True
-        trainer.save_state()
+        trainer.save_state()  # for debug, not save
         if trainer.is_deepspeed_enabled:
             trainer.save_model()
         else:

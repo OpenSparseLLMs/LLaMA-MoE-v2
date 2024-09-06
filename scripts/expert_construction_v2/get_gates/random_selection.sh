@@ -58,42 +58,44 @@ export LOGLEVEL=INFO
   echo "Node IP: $head_node_ip"
 }
 
-model_type="llama"
-model_path="/mnt/petrelfs/share_data/quxiaoye/models/Meta-Llama-3-8B-Instruct"
-dataset_dir_or_path="/mnt/petrelfs/share_data/quxiaoye/llama_moe_v2/OpenHermes-2.5/openhermes2_5.jsonl"
+{
+  model_type="llama"
+  model_path="/mnt/petrelfs/share_data/quxiaoye/models/Meta-Llama-3-8B-Instruct"
+  dataset_dir_or_path="/mnt/petrelfs/share_data/quxiaoye/llama_moe_v2/OpenHermes-2.5/openhermes2_5.jsonl"
 
-per_device_train_batch_size=8
-max_steps=10 # the total number of samples shouldn't be too large, as the KMeans is of n^2 complexity
-model_max_length=4096
+  per_device_train_batch_size=8
+  max_steps=10
+  model_max_length=4096
 
-echo "Maximum number of tokens for clustering: $((${num_gpu_per_node} * ${per_device_train_batch_size} * ${max_steps} * ${model_max_length})) (paddings are taken into account here)"
+  echo "Maximum number of possible tokens: $((${num_gpu_per_node} * ${per_device_train_batch_size} * ${max_steps} * ${model_max_length})) (paddings are taken into account here)"
 
-num_experts=16
-random_state=114514
+  num_experts=16
+  random_state=114514
 
-output_dir="/mnt/petrelfs/dongdaize.d/workspace/llama-moe-v2/outputs/v2_mixtral_gate_random"
-output_dir="${output_dir}/${num_experts}experts"
-save_path="${output_dir}/results"
+  output_dir="/mnt/petrelfs/share_data/quxiaoye/llama_moe_v2/v2_mixtral_gate"
+  output_dir="${output_dir}/${num_experts}experts-random-features"
+  save_path="${output_dir}/results"
 
-srun torchrun \
-  --nnodes ${num_nodes} \
-  --nproc_per_node ${num_gpu_per_node} \
-  --node_rank $SLURM_NODEID \
-  --rdzv_id $RANDOM \
-  --rdzv_backend c10d \
-  --rdzv_endpoint $head_node:$port \
-  smoe/entrypoint/expert_construction_v2/get_gates/hidden_feature_random_selection.py \
-  --model_name_or_path ${model_path} \
-  --model_type ${model_type} \
-  --dataset_dir_or_path ${dataset_dir_or_path} \
-  --per_device_train_batch_size ${per_device_train_batch_size} \
-  --seed ${random_state} \
-  --bf16 \
-  --max_steps ${max_steps} \
-  --model_max_length ${model_max_length} \
-  --output_dir ${output_dir} \
-  --overwrite_output_dir \
-  --torch_dtype bfloat16 \
-  --report_to none \
-  --save_path ${save_path} \
-  --num_experts ${num_experts}
+  srun torchrun \
+    --nnodes ${num_nodes} \
+    --nproc_per_node ${num_gpu_per_node} \
+    --node_rank $SLURM_NODEID \
+    --rdzv_id $RANDOM \
+    --rdzv_backend c10d \
+    --rdzv_endpoint $head_node:$port \
+    smoe/entrypoint/expert_construction_v2/get_gates/hidden_feature_random_selection.py \
+    --model_name_or_path ${model_path} \
+    --model_type ${model_type} \
+    --dataset_dir_or_path ${dataset_dir_or_path} \
+    --per_device_train_batch_size ${per_device_train_batch_size} \
+    --seed ${random_state} \
+    --bf16 \
+    --max_steps ${max_steps} \
+    --model_max_length ${model_max_length} \
+    --output_dir ${output_dir} \
+    --overwrite_output_dir \
+    --torch_dtype bfloat16 \
+    --report_to none \
+    --save_path ${save_path} \
+    --num_experts ${num_experts}
+}

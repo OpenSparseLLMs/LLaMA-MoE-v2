@@ -62,7 +62,7 @@ if __name__ == "__main__":
         score_list = [this_layer_scores[j] for j in range(len(this_layer_scores))]
 
         # check configs
-        assert args.num_experts_moe + args.num_experts_residual == len(score_list)
+        assert args.num_experts_moe == len(score_list)
 
         if args.expert_size is None:
             args.expert_size = score_list[0].numel() // (args.num_experts_moe + args.num_experts_residual)
