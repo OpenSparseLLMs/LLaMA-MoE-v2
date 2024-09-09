@@ -13,6 +13,12 @@ from transformers import PreTrainedTokenizer, Trainer
 from transformers.trainer_pt_utils import LabelSmoother
 
 from smoe.models.mixtral import MixtralConfig, MixtralForCausalLM
+from smoe.models.mixtral_residual.configuration_mixtral_residual import (
+    MixtralResidualConfig,
+)
+from smoe.models.mixtral_residual.modeling_mixtral_residual import (
+    MixtralResidualForCausalLM,
+)
 from smoe.utils.conversation import Llama3ConversationTemplate
 from smoe.utils.io import load_json, load_jsonlines
 
@@ -118,9 +124,7 @@ def preprocess(
 ) -> Dict:
     # Apply prompt templates
 
-    prompt, source_part = Llama3ConversationTemplate.parse(
-        instances["conversations"], skip_system=True
-    )
+    prompt, source_part = Llama3ConversationTemplate.parse(instances["conversations"], skip_system=True)
 
     # Tokenize conversations
     res_conv = tokenizer(
@@ -338,6 +342,9 @@ def get_model(
     elif model_type == "v2_mixtral":
         ConfigClass = MixtralConfig
         ModelClass = MixtralForCausalLM
+    elif model_type == "v2_mixtral_residual":
+        ConfigClass = MixtralResidualConfig
+        ModelClass = MixtralResidualForCausalLM
     else:
         raise ValueError(f"Unknown model type: {model_type}")
 
@@ -470,7 +477,8 @@ def train():
         tokenizer=tokenizer,
         args=training_args,
         train_dataset=train_dataset,
-        data_collator=fault_tolerance_data_collator,
+        data_collator=simple_fault_tolerance_data_collator,
+        # data_collator=fault_tolerance_data_collator,
         # num_processes=1 # for flash_attention_2
     )
     logger.info("trainer ready")

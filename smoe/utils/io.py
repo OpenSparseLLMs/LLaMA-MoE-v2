@@ -112,3 +112,21 @@ def compress_png_image(image_path, print_info=False):
     cv2.imwrite(image_path, img, [cv2.IMWRITE_PNG_COMPRESSION, 9])
     if print_info:
         print(f'Done for "{image_path}".')
+
+
+def get_pathname_from_name_or_path(name_or_path: str) -> str:
+    """Get the name suitable for file system from the HF-style `name_or_path`."""
+    realpath = os.path.realpath(name_or_path)
+
+    if not (name_or_path.startswith("/") or os.path.exists(realpath)):  # HF Hub
+        pathname = name_or_path
+    else:  # Local
+        if os.path.isfile(realpath):  # don't split with no extension
+            name_or_path = os.path.splitext(name_or_path)[0]
+        if "/checkpoint-" not in name_or_path:
+            pathname = os.path.basename(name_or_path)
+        else:
+            pathname = "/".join(name_or_path.split("/")[-2:])
+    pathname = pathname.replace("/", "--")
+
+    return pathname

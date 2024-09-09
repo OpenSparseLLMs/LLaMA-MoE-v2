@@ -1801,7 +1801,8 @@ class MixtralDecoderLayer(nn.Module):
             router_logits = None
 
         if self.mlp_residual is not None:
-            hidden_states += self.mlp_residual(hidden_states)  # 🔍
+            # hidden_states += self.mlp_residual(hidden_states)  # 🔍
+            hidden_states = self.mlp_residual(hidden_states) + hidden_states  # 🔍
         hidden_states = residual + hidden_states
 
         outputs = (hidden_states,)

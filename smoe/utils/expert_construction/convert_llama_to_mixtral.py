@@ -1,5 +1,7 @@
 import math
 import os.path
+import math
+import os.path
 import re
 import shutil
 from collections import defaultdict
@@ -8,6 +10,7 @@ from pathlib import Path
 import torch
 from safetensors import safe_open
 from safetensors.torch import save_file
+from torch.nn import init
 from torch.nn import init
 from transformers.modeling_utils import dtype_byte_size
 
@@ -250,6 +253,8 @@ def convert_safetensors(
 
 
 if __name__ == "__main__":
+    num_experts = 8
+    top_k = 2
     num_experts = 8
     top_k = 2
 
