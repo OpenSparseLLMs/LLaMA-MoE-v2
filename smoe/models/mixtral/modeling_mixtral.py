@@ -953,32 +953,36 @@ class MixtralAttentionMoE(MixtralAttention):
             # Notice that the `attention_mask` is passed intact during both training & generation, so we need to adjust the `top_x` by `past_key_values_length`.
             # However, we don't have the routing information of previous tokens, which makes it impossible to create `current_attention_mask` for previous tokens.
             # So here we need an extra "attention mask cache" to record the `attention_mask` for previous tokens, and update for new tokens accordingly during generation.
-            if attention_mask is not None:
-                current_attention_mask = torch.zeros((bsz, this_q_len), dtype=attention_mask.dtype, device=device)
+            current_attention_mask = torch.zeros((bsz, this_q_len), dtype=torch.bool, device=device)
 
+            if attention_mask is not None:
                 if past_key_values_length > 0:  # 🔍 we need to exclude previous tokens
                     previous_seen_tokens_total = past_key_value._seen_tokens_total - q_len
                     temp_attention_mask = attention_mask[:, previous_seen_tokens_total:].flatten()  # select along dimension 1 so that we get tokens in this iteration
                 else:
                     temp_attention_mask = attention_mask.flatten()  # flatten the dim
-
                 current_attention_mask[current_batch_ids, current_seq_ids] = temp_attention_mask[top_x]  # assign masks sparsely
 
-                if past_key_value is not None:  # 🔍 we need to update with cached attention mask
-                    current_attention_mask = past_key_value.update_attention_mask(current_attention_mask, self.layer_idx, expert_idx)
+            else:
+                current_attention_mask[current_batch_ids, current_seq_ids] = True  # assign masks sparsely
 
-                current_attention_mask = _prepare_4d_causal_attention_mask(
-                    current_attention_mask,
-                    (bsz, this_q_len),
-                    current_state,
-                    past_key_values_length,
-                    sliding_window=self.config.sliding_window,
-                )
+            if past_key_value is not None:  # 🔍 we need to update with cached attention mask
+                current_attention_mask = past_key_value.update_attention_mask(current_attention_mask, self.layer_idx, expert_idx)
 
-                if current_attention_mask.size() != (bsz, 1, this_q_len, kv_seq_len):  # 🔍 q_len -> this_q_len
-                    raise ValueError(f"Attention mask should be of size {(bsz, 1, this_q_len, kv_seq_len)}, but is {current_attention_mask.size()}")
+            # if self.layer_idx == 0 and expert_idx == 0:
+            #     print("current_attention_mask", current_attention_mask.sum(-1), current_attention_mask.shape, current_attention_mask[0])
+            current_attention_mask = _prepare_4d_causal_attention_mask(
+                current_attention_mask,
+                (bsz, this_q_len),
+                current_state,
+                past_key_values_length,
+                sliding_window=self.config.sliding_window,
+            )
 
-                attn_weights = attn_weights + current_attention_mask  # 🔍
+            if current_attention_mask.size() != (bsz, 1, this_q_len, kv_seq_len):  # 🔍 q_len -> this_q_len
+                raise ValueError(f"Attention mask should be of size {(bsz, 1, this_q_len, kv_seq_len)}, but is {current_attention_mask.size()}")
+
+            attn_weights = attn_weights + current_attention_mask  # 🔍
 
             # upcast attention to fp32
             attn_weights = nn.functional.softmax(attn_weights, dim=-1, dtype=torch.float32).to(query_states.dtype)
@@ -1990,7 +1994,7 @@ class MixtralModel(MixtralPreTrainedModel):
                 past_key_values_length,
                 sliding_window=self.config.sliding_window,
             )
-
+        # print("attention_mask" , attention_mask)
         hidden_states = inputs_embeds
 
         # decoder layers
@@ -2184,6 +2188,7 @@ class MixtralForCausalLM(MixtralPreTrainedModel):
             # Enable model parallelism
             shift_labels = shift_labels.to(shift_logits.device)
             loss = loss_fct(shift_logits, shift_labels)
+            # print("MixtralForCausalLM, cross entropy loss", loss)
 
         aux_loss = None
         if output_router_logits:
@@ -2201,6 +2206,9 @@ class MixtralForCausalLM(MixtralPreTrainedModel):
             )
             if labels is not None:
                 loss += self.router_aux_loss_coef * aux_loss
+                # loss_mlp = self.router_aux_loss_coef * aux_loss
+                # loss = loss + loss_mlp
+                # print("MixtralForCausalLM, mlp aux_loss", loss_mlp)
 
             # 🔍 for Attention MoE
             #################################
@@ -2221,6 +2229,9 @@ class MixtralForCausalLM(MixtralPreTrainedModel):
                 )
                 if labels is not None:
                     loss += self.router_aux_loss_coef * attn_aux_loss
+                    # loss_attn = self.router_aux_loss_coef * attn_aux_loss
+                    # loss = loss + loss_attn
+                    # print("MixtralForCausalLM, attn aux_loss", loss_attn)
             #################################
 
         if not return_dict:
