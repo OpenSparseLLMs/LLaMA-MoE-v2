@@ -270,7 +270,7 @@ def load_balancing_loss_func(
     Returns:
         The auxiliary loss.
     """
-    if gate_logits is None:
+    if gate_logits is None or (isinstance(gate_logits, Iterable) and len(gate_logits) == 0):
         return 0
 
     # ✨ Here is the fix for balance loss in Mixtral.
@@ -1698,13 +1698,14 @@ class MixtralDecoderLayer(nn.Module):
         )
         self.use_attn_moe = config.use_attn_moe
 
+        if self.use_attn_moe:
+            attn_class = MISTRAL_ATTENTION_MOE_CLASSES[config._attn_implementation]
+        else:
+            attn_class = MISTRAL_ATTENTION_CLASSES[config._attn_implementation]
+        self.self_attn = attn_class(config, layer_idx)
+
+
         if self.is_moe:
-            attn_class = (
-                MISTRAL_ATTENTION_MOE_CLASSES[config._attn_implementation]
-                if self.use_attn_moe
-                else MISTRAL_ATTENTION_CLASSES[config._attn_implementation]
-            )
-            self.self_attn = attn_class(config, layer_idx)
             self.block_sparse_moe = MixtralSparseMoeBlock(config)
             self.mlp_residual = (
                 MixtralBLockSparseTop2MLP(config, config.intermediate_size_residual)
@@ -1713,8 +1714,6 @@ class MixtralDecoderLayer(nn.Module):
             )
 
         else:
-            attn_class = MISTRAL_ATTENTION_CLASSES[config._attn_implementation]
-            self.self_attn = attn_class(config, layer_idx)
             self.block_sparse_moe = MixtralBLockSparseTop2MLP(
                 config, config.intermediate_size * config.num_local_experts
             )
@@ -1766,7 +1765,7 @@ class MixtralDecoderLayer(nn.Module):
         hidden_states = self.input_layernorm(hidden_states)
 
         # 🔍 Self Attention
-        if self.is_moe and self.use_attn_moe:
+        if self.use_attn_moe:
             (
                 hidden_states,
                 self_attn_weights,
@@ -1795,18 +1794,18 @@ class MixtralDecoderLayer(nn.Module):
 
         # Fully Connected
         residual = hidden_states
-        hidden_states = self.post_attention_layernorm(hidden_states)
+        hidden_states_input = self.post_attention_layernorm(hidden_states)
 
         # 🔍
         if self.is_moe:
-            hidden_states, router_logits = self.block_sparse_moe(hidden_states)
+            hidden_states, router_logits = self.block_sparse_moe(hidden_states_input)
         else:
-            hidden_states = self.block_sparse_moe(hidden_states)
+            hidden_states = self.block_sparse_moe(hidden_states_input)
             router_logits = None
 
         if self.mlp_residual is not None:
-            # hidden_states += self.mlp_residual(hidden_states)  # 🔍
-            hidden_states = self.mlp_residual(hidden_states) + hidden_states  # 🔍
+            hidden_states += self.mlp_residual(hidden_states_input)  #     
+
         hidden_states = residual + hidden_states
 
         outputs = (hidden_states,)
