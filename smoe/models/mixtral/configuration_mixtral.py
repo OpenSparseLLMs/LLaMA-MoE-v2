@@ -170,6 +170,7 @@ class MixtralConfig(PretrainedConfig):
         num_moe_contract_layers: int = 0,  # 🔍 the number of layers that are not converted into MoE at each side of the model
         use_attn_moe: bool = False,  # 🔍
         top_k_attn: int = None,  # 🔍
+        attn_experts: int = None, 
         scale_factor_attn: float = None,  # 🔍
         use_layer_wise_balance: bool = False,  # ✨ whether to fix the balance loss bug for Mixtral
         add_rescale_bias: bool = False,  # 🔍 whether to add bias to the AttentionMoE `o_proj` & MoE `down_proj` for distribution alignment
@@ -208,6 +209,7 @@ class MixtralConfig(PretrainedConfig):
         self.use_attn_moe = use_attn_moe
         self.top_k_attn = top_k_attn
         self.scale_factor_attn = scale_factor_attn
+        self.attn_experts = attn_experts
 
         # ✨ For balance loss bugfix
         self.use_layer_wise_balance = use_layer_wise_balance
@@ -232,11 +234,15 @@ class MixtralConfig(PretrainedConfig):
         if hasattr(self, "_attn_implementation_internal"):
             if self._attn_implementation_internal is None:
                 # `config.attn_implementation` should never be None, for backward compatibility.
-                return "eager"
+                return "flash_attention_2"
+                # return "eager"
             else:
                 return self._attn_implementation_internal
         else:
-            return "eager"
+            return "flash_attention_2"
+            # return "eager"
+            
+
 
     @_attn_implementation.setter
     def _attn_implementation(self, value):

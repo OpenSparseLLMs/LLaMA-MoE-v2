@@ -812,16 +812,20 @@ class MixtralAttentionMoE(MixtralAttention):
             )
 
         # 🔍
-        self.gate = nn.Linear(self.hidden_size, self.num_key_value_heads, bias=False)
         self.softmax = nn.Softmax(dim=-1)
         self.top_k_attn = config.top_k_attn
+        self.attn_experts = config.attn_experts
         self.scale_factor_attn = config.scale_factor_attn
 
+        self.split_ratio = self.attn_experts // self.num_key_value_heads
+
+        self.gate = nn.Linear(self.hidden_size, self.attn_experts, bias=False)
+
         # 🔍
-        self.q_proj = nn.ModuleList([nn.Linear(self.hidden_size, self.num_key_value_groups * self.head_dim, bias=False) for _ in range(self.num_key_value_heads)])
-        self.k_proj = nn.ModuleList([nn.Linear(self.hidden_size, self.head_dim, bias=False) for _ in range(self.num_key_value_heads)])
-        self.v_proj = nn.ModuleList([nn.Linear(self.hidden_size, self.head_dim, bias=False) for _ in range(self.num_key_value_heads)])
-        self.o_proj = nn.ModuleList([nn.Linear(self.num_key_value_groups * self.head_dim, self.hidden_size, bias=config.add_rescale_bias) for _ in range(self.num_key_value_heads)])  # 🔍 (may add bias for rescaling)
+        self.q_proj = nn.ModuleList([nn.Linear(self.hidden_size, self.num_key_value_groups * self.head_dim // self.split_ratio, bias=False) for _ in range(self.attn_experts)])
+        self.k_proj = nn.ModuleList([nn.Linear(self.hidden_size, self.head_dim, bias=False) for _ in range(self.attn_experts)])
+        self.v_proj = nn.ModuleList([nn.Linear(self.hidden_size, self.head_dim, bias=False) for _ in range(self.attn_experts)])
+        self.o_proj = nn.ModuleList([nn.Linear(self.num_key_value_groups * self.head_dim // self.split_ratio, self.hidden_size, bias=config.add_rescale_bias) for _ in range(self.attn_experts)])  # 🔍 (may add bias for rescaling)
 
         self.rotary_emb = MixtralRotaryEmbedding(
             self.head_dim,
@@ -847,6 +851,7 @@ class MixtralAttentionMoE(MixtralAttention):
             raise TypeError(
                 "`past_key_value` must be a `MoECache` instance for attention MoE!"
             )
+        # print("attention_mask", attention_mask, attention_mask.shape)
         device = hidden_states.device
         dtype = hidden_states.dtype
         bsz, q_len, hidden_dim = hidden_states.size()
@@ -865,12 +870,12 @@ class MixtralAttentionMoE(MixtralAttention):
 
         # One hot encode the selected experts to create an expert mask
         # this will be used to easily index which expert is going to be sollicitated
-        expert_mask = torch.nn.functional.one_hot(selected_experts, num_classes=self.num_key_value_heads)  # (bsz * q_len, top_k_attn, num_key_value_heads)
+        expert_mask = torch.nn.functional.one_hot(selected_experts, num_classes=self.attn_experts)  # (bsz * q_len, top_k_attn, num_key_value_heads)
         expert_mask = expert_mask.permute(2, 1, 0)  # (num_key_value_heads, top_k_attn, bsz * q_len)
 
         # Loop over all available experts in the model and perform the computation on each expert
         all_attn_weights = [] if output_attentions else None
-        for expert_idx in range(self.num_key_value_heads):
+        for expert_idx in range(self.attn_experts):
             # expert_mask[expert_idx]: (top_k_attn, bsz * q_len)
             # idx: the topk position. (selected_num)
             # top_x: token index. (selected_num)
@@ -911,7 +916,7 @@ class MixtralAttentionMoE(MixtralAttention):
             key_states = self.k_proj[expert_idx](current_state)  # 🔍 specify expert
             value_states = self.v_proj[expert_idx](current_state)  # 🔍 specify expert
 
-            query_states = query_states.view(bsz, this_q_len, self.num_key_value_groups, self.head_dim).transpose(1, 2)  # 🔍 q_len -> this_q_len, num_heads -> num_key_value_groups
+            query_states = query_states.view(bsz, this_q_len, self.num_key_value_groups // self.split_ratio, self.head_dim).transpose(1, 2)  # 🔍 q_len -> this_q_len, num_heads -> num_key_value_groups
             key_states = key_states.view(bsz, this_q_len, 1, self.head_dim).transpose(1, 2)  # 🔍 q_len -> this_q_len, num_key_value_heads -> 1
             value_states = value_states.view(bsz, this_q_len, 1, self.head_dim).transpose(1, 2)  # 🔍 q_len -> this_q_len, num_key_value_heads -> 1
 
@@ -946,8 +951,8 @@ class MixtralAttentionMoE(MixtralAttention):
 
             attn_weights = torch.matmul(query_states, key_states.transpose(2, 3)) / math.sqrt(self.head_dim)  # softmax temperature
 
-            if attn_weights.size() != (bsz, self.num_key_value_groups, this_q_len, kv_seq_len):  # 🔍 q_len -> this_q_len, num_heads -> num_key_value_groups
-                raise ValueError(f"Attention weights should be of size {(bsz, self.num_key_value_groups, this_q_len, kv_seq_len)}, but is {attn_weights.size()}")
+            if attn_weights.size() != (bsz, self.num_key_value_groups // self.split_ratio, this_q_len, kv_seq_len):  # 🔍 q_len -> this_q_len, num_heads -> num_key_value_groups
+                raise ValueError(f"Attention weights should be of size {(bsz, self.num_key_value_groups // self.split_ratio, this_q_len, kv_seq_len)}, but is {attn_weights.size()}")
 
             # 🔍 create `current_attention_mask` with reduced `seq_len`
             # Notice that the `attention_mask` is passed intact during both training & generation, so we need to adjust the `top_x` by `past_key_values_length`.
@@ -966,6 +971,7 @@ class MixtralAttentionMoE(MixtralAttention):
             else:
                 current_attention_mask[current_batch_ids, current_seq_ids] = True  # assign masks sparsely
 
+            # print("current_attention_mask", current_attention_mask, current_attention_mask.shape)
             if past_key_value is not None:  # 🔍 we need to update with cached attention mask
                 current_attention_mask = past_key_value.update_attention_mask(current_attention_mask, self.layer_idx, expert_idx)
 
@@ -983,17 +989,17 @@ class MixtralAttentionMoE(MixtralAttention):
                 raise ValueError(f"Attention mask should be of size {(bsz, 1, this_q_len, kv_seq_len)}, but is {current_attention_mask.size()}")
 
             attn_weights = attn_weights + current_attention_mask  # 🔍
-
+            # print("current_attention_mask", current_attention_mask.shape, current_attention_mask[0])
             # upcast attention to fp32
             attn_weights = nn.functional.softmax(attn_weights, dim=-1, dtype=torch.float32).to(query_states.dtype)
             attn_weights = nn.functional.dropout(attn_weights, p=self.attention_dropout, training=self.training)
             attn_output = torch.matmul(attn_weights, value_states)
 
-            if attn_output.size() != (bsz, self.num_key_value_groups, this_q_len, self.head_dim):  # 🔍 q_len -> this_q_len, num_heads -> num_key_value_groups
-                raise ValueError(f"`attn_output` should be of size {(bsz, self.num_heads, q_len, self.head_dim)}, but is {attn_output.size()}")
+            # if attn_output.size() != (bsz, self.num_key_value_groups // self.split_ratio, this_q_len, self.head_dim):  # 🔍 q_len -> this_q_len, num_heads -> num_key_value_groups
+                # raise ValueError(f"`attn_output` should be of size {(bsz, self.num_heads, q_len, self.head_dim)}, but is {attn_output.size()}")
 
             attn_output = attn_output.transpose(1, 2).contiguous()
-            attn_output = attn_output.reshape(bsz, this_q_len, self.num_key_value_groups * self.head_dim)  # 🔍 q_len -> this_q_len, hidden_size -> num_key_value_groups * head_dim
+            attn_output = attn_output.reshape(bsz, this_q_len, self.num_key_value_groups * self.head_dim // self.split_ratio)  # 🔍 q_len -> this_q_len, hidden_size -> num_key_value_groups * head_dim
             attn_output = self.o_proj[expert_idx](attn_output)
             # ---------------------------------------------- #
 
@@ -1026,27 +1032,16 @@ class MixtralAttentionMoE(MixtralAttention):
         # init
         attention_moe = MixtralAttentionMoE(config, layer_idx)
 
+        split = 1  # split the hidden_size, support split=1 --> 8/2, split=2 --> 16/4, split=4 --> 32/8
         # copy weights
-        num_key_value_groups = attention_moe.num_key_value_groups
+        num_key_value_groups = attention_moe.num_key_value_groups // split
         head_dim = attention_moe.head_dim
 
-        # attention
-        # q_proj: (self.hidden_size, self.num_heads * self.head_dim)
-        # k_proj: (self.hidden_size, self.num_key_value_heads * self.head_dim)
-        # v_proj: (self.hidden_size, self.num_key_value_heads * self.head_dim)
-        # o_proj: (self.num_heads * self.head_dim, self.hidden_size)
-
-        # attention_moe
-        # q_proj: (self.hidden_size, self.num_key_value_groups * self.head_dim)
-        # k_proj: (self.hidden_size, self.head_dim)
-        # v_proj: (self.hidden_size, self.head_dim)
-        # o_proj: (self.num_key_value_groups * self.head_dim, self.hidden_size)
-
-        for i in range(config.num_key_value_heads):
+        for i in range(config.num_key_value_heads * split):
             indices_q_o = [j for j in range(head_dim * num_key_value_groups * i, head_dim * num_key_value_groups * (i + 1))]
-            indices_k_v = [j for j in range(head_dim * i, head_dim * (i + 1))]
+            indices_k_v = [j for j in range(head_dim * (i // split), head_dim * ((i // split) + 1))]
 
-            # print(i, "indices_q_o", indices_q_o)
+            print(i, "indices_q_o", indices_q_o)
             # print(i, "indices_k_v", indices_k_v)
 
             attention_moe.q_proj[i].weight.data = attention.q_proj.weight.data[indices_q_o].clone()
@@ -1204,6 +1199,7 @@ class MixtralFlashAttention2(MixtralAttention):
         key_states = key_states.transpose(1, 2)
         value_states = value_states.transpose(1, 2)
 
+        # print("attention_mask", attention_mask, attention_mask.shape)
         attn_output = self._flash_attention_forward(
             query_states,
             key_states,
@@ -1341,7 +1337,6 @@ class MixtralFlashAttention2(MixtralAttention):
         self, query_layer, key_layer, value_layer, attention_mask, query_length
     ):
         batch_size, kv_seq_len, num_heads, head_dim = key_layer.shape
-
         # On the first iteration we need to properly re-create the padding mask
         # by slicing it on the proper place
         if kv_seq_len != attention_mask.shape[-1]:
@@ -1389,6 +1384,513 @@ class MixtralFlashAttention2(MixtralAttention):
         )
 
 
+
+class MixtralFlashAttention2MoE(MixtralFlashAttention2):
+    def __init__(self, *args, **kwargs):
+        super().__init__(*args, **kwargs)
+
+        self.top_k_attn = self.config.top_k_attn
+        self.scale_factor_attn = self.config.scale_factor_attn
+
+        self.gate = nn.Linear(self.hidden_size, self.num_key_value_heads, bias=False)
+
+        self.q_proj = nn.ModuleList([nn.Linear(self.hidden_size, self.num_key_value_groups * self.head_dim, bias=False) for _ in range(self.num_key_value_heads)])
+        self.k_proj = nn.ModuleList([nn.Linear(self.hidden_size, self.head_dim, bias=False) for _ in range(self.num_key_value_heads)])
+        self.v_proj = nn.ModuleList([nn.Linear(self.hidden_size, self.head_dim, bias=False) for _ in range(self.num_key_value_heads)])
+        self.o_proj = nn.ModuleList([nn.Linear(self.num_key_value_groups * self.head_dim, self.hidden_size, bias=self.config.add_rescale_bias) for _ in range(self.num_key_value_heads)]) 
+    
+    def forward(
+        self,
+        hidden_states: torch.Tensor,
+        attention_mask: Optional[torch.Tensor] = None,
+        position_ids: Optional[torch.LongTensor] = None,
+        past_key_value: Optional[Cache] = None,
+        output_attentions: bool = False,
+        use_cache: bool = False,
+        **kwargs,
+    ):
+        
+        if "padding_mask" in kwargs:
+            warnings.warn(
+                "Passing `padding_mask` is deprecated and will be removed in v4.37. Please make sure use `attention_mask` instead.`"
+            )
+
+            # overwrite attention_mask with padding_mask
+            # attention_mask = kwargs.pop("padding_mask")
+        
+        if past_key_value is not None and not isinstance(past_key_value, MoECache):  # 🔍 type check
+            raise TypeError(
+                "`past_key_value` must be a `MoECache` instance for attention MoE!"
+            )
+        
+        bsz, q_len, hidden_dim = hidden_states.size()
+        device = hidden_states.device
+        dtype = hidden_states.dtype
+
+        hidden_states = hidden_states.reshape(-1, hidden_dim)
+        # gate compute
+        router_logits = self.gate(hidden_states)
+        router_scores = F.softmax(router_logits, dim=1, dtype=torch.float)
+        routing_weights, selected_experts = torch.topk(router_scores, self.top_k_attn, dim=-1)
+        routing_weights /= routing_weights.sum(dim=-1, keepdim=True)
+        routing_weights = routing_weights.to(dtype)
+
+        final_attn_output = torch.zeros_like(hidden_states).reshape(-1, hidden_dim)
+
+        expert_mask = F.one_hot(selected_experts, num_classes=self.num_heads).permute(2, 1, 0)
+
+        # all_attn_weights = [] if output_attentions else None
+        
+        for expert_idx in range(self.num_key_value_heads):
+            idx, top_x = torch.nonzero(expert_mask[expert_idx], as_tuple=True)
+            # top_x_list = top_x.tolist()
+            # idx_list = idx.tolist()
+
+            if top_x.shape[0] == 0 and not self.training:  # skip during training will lead to asynchrony among different GPUs and blocks the training!
+                continue
+
+            # create position_ids for selected tokens
+            current_batch_ids = (top_x // q_len)
+            each_batch_selected_token_num = torch.bincount(current_batch_ids, minlength=bsz)  # (bsz)
+            this_q_len = each_batch_selected_token_num.max().item()
+
+            selection_mask = torch.zeros((bsz * q_len,), device=device, dtype=torch.bool)
+            selection_mask[top_x] = True
+            selection_mask = selection_mask.reshape(bsz, q_len)
+            token_position_indices = torch.cumsum(selection_mask, dim=1) - 1
+            token_position_indices = token_position_indices.flatten()
+            current_seq_ids = token_position_indices[top_x] 
+            
+
+            # 🔍 initialize hidden_states for this expert
+            current_state = torch.zeros((bsz, this_q_len, hidden_dim), dtype=dtype, device=device)
+            current_state[current_batch_ids, current_seq_ids] = hidden_states[top_x]  # assign tokens sparsely
+
+            # for attention forward
+            # expert_inputs = viewed_hidden_states[None, top_x_list].reshape(-1, self.hidden_size)
+
+            query_states = self.q_proj[expert_idx](current_state)
+            key_states = self.k_proj[expert_idx](current_state) 
+            value_states = self.v_proj[expert_idx](current_state) 
+
+            # seq_len = query_states.numel() // (bsz * self.num_key_value_groups * self.head_dim)
+            query_states = query_states.view(bsz, -1, self.num_key_value_groups, self.head_dim).transpose(1, 2)
+            key_states = key_states.view(bsz, -1, 1, self.head_dim).transpose(1, 2)
+            value_states = value_states.view(bsz, -1, 1, self.head_dim).transpose(1, 2)
+
+            # for moe kv cache 
+            past_key_values_length = 0
+            kv_seq_len = key_states.shape[-2]
+            if past_key_value is not None:
+                if self.layer_idx is None:
+                    raise ValueError(
+                        f"The cache structure has changed since version v4.36. If you are using {self.__class__.__name__} "
+                        "for auto-regressive decoding with k/v caching, please make sure to initialize the attention class "
+                        "with a layer index."
+                    )
+                past_key_values_length = past_key_value.get_usable_length(kv_seq_len, self.layer_idx, expert_idx)  # 🔍 specify expert index
+                kv_seq_len += past_key_values_length
+        
+            current_position_ids = torch.zeros((bsz, this_q_len), device=hidden_states.device, dtype=torch.long)
+            current_position_ids[current_batch_ids, current_seq_ids] = position_ids.expand(bsz, q_len).flatten()[top_x]
+
+            if top_x.shape[0] > 0:  # apply only when there are tokens
+                cos, sin = self.rotary_emb(value_states, seq_len=current_position_ids.max().item() + 1)  # 🔍 adjust the seq_len to the maximum possible value
+                query_states, key_states = apply_rotary_pos_emb(query_states, key_states, cos, sin, current_position_ids)
+
+            if past_key_value is not None:
+                cache_kwargs = {"sin": sin, "cos": cos}  # Specific to RoPE models
+                key_states, value_states = past_key_value.update(key_states, value_states, self.layer_idx, expert_idx, cache_kwargs)  # 🔍 specify expert index
+
+            # print("attention_mask", attention_mask.shape, attention_mask)
+            # for current attention mask
+            
+            '''
+            current_attention_mask = torch.zeros((bsz, this_q_len), dtype=torch.bool, device=device)
+
+            if attention_mask is not None:
+                if past_key_values_length > 0:  # 🔍 we need to exclude previous tokens
+                    previous_seen_tokens_total = past_key_value._seen_tokens_total - q_len
+                    temp_attention_mask = attention_mask[:, previous_seen_tokens_total:].flatten()  # select along dimension 1 so that we get tokens in this iteration
+                else:
+                    temp_attention_mask = attention_mask.flatten()  # flatten the dim
+                current_attention_mask[current_batch_ids, current_seq_ids] = temp_attention_mask[top_x]  # bug here !!! 
+
+            else:
+                current_attention_mask[current_batch_ids, current_seq_ids] = True  # assign masks sparsely
+
+            if past_key_value is not None:  # 🔍 we need to update with cached attention mask
+                current_attention_mask = past_key_value.update_attention_mask(current_attention_mask, self.layer_idx, expert_idx)
+
+            
+            current_attention_mask = _prepare_4d_causal_attention_mask(
+                current_attention_mask,
+                (bsz, this_q_len),
+                current_state,
+                past_key_values_length,
+                sliding_window=self.config.sliding_window,
+            )
+
+            if current_attention_mask.size() != (bsz, 1, this_q_len, kv_seq_len):  # 🔍 q_len -> this_q_len
+                raise ValueError(f"Attention mask should be of size {(bsz, 1, this_q_len, kv_seq_len)}, but is {current_attention_mask.size()}")
+            
+            '''
+
+            # for sliding window
+            use_sliding_windows = (
+                _flash_supports_window_size
+                and getattr(self.config, "sliding_window", None) is not None
+                and kv_seq_len > self.config.sliding_window
+            )
+
+            if not _flash_supports_window_size:
+                logger.warning_once(
+                    "The current flash attention version does not support sliding window attention, for a more memory efficient implementation"
+                    " make sure to upgrade flash-attn library."
+                )
+
+            # wait for change! sliding_window=4096
+            if past_key_value is not None:
+                # Activate slicing cache only if the config has a value `sliding_windows` attribute
+                cache_has_contents = past_key_value.get_seq_length(self.layer_idx) > 0
+                if (
+                    getattr(self.config, "sliding_window", None) is not None
+                    and kv_seq_len > self.config.sliding_window
+                    and cache_has_contents
+                ):
+                    slicing_tokens = 1 - self.config.sliding_window
+
+                    past_key = past_key_value[self.layer_idx][0]
+                    past_value = past_key_value[self.layer_idx][1]
+
+                    past_key = past_key[:, :, slicing_tokens:, :].contiguous()
+                    past_value = past_value[:, :, slicing_tokens:, :].contiguous()
+
+                    if past_key.shape[-2] != self.config.sliding_window - 1:
+                        raise ValueError(
+                            f"past key must have a shape of (`batch_size, num_heads, self.config.sliding_window-1, head_dim`), got"
+                            f" {past_key.shape}"
+                        )
+
+                    if attention_mask is not None:
+                        attention_mask = attention_mask[:, slicing_tokens:]
+                        attention_mask = torch.cat(
+                            [attention_mask, torch.ones_like(attention_mask[:, -1:])],
+                            dim=-1,
+                        )
+
+                cache_kwargs = {"sin": sin, "cos": cos}  # Specific to RoPE models
+                key_states, value_states = past_key_value.update(
+                    key_states, value_states, self.layer_idx, cache_kwargs
+                )
+
+            # for input dtype
+            input_dtype = query_states.dtype
+            if input_dtype == torch.float32:
+                # Handle the case where the model is quantized
+                if hasattr(self.config, "_pre_quantization_dtype"):
+                    target_dtype = self.config._pre_quantization_dtype
+                else:
+                    target_dtype = self.q_proj.weight.dtype
+
+                logger.warning_once(
+                    f"The input hidden states seems to be silently casted in float32, this might be related to"
+                    f" the fact you have upcasted embedding or layer norm layers in float32. We will cast back the input in"
+                    f" {target_dtype}."
+                )
+
+                query_states = query_states.to(target_dtype)
+                key_states = key_states.to(target_dtype)
+                value_states = value_states.to(target_dtype)
+
+            dropout_rate = 0.0 if not self.training else self.attention_dropout
+
+            repeat_num = query_states.shape[1]
+            key_states = repeat_kv(key_states, repeat_num)
+            value_states = repeat_kv(value_states, repeat_num)
+
+            # print("repeat_num", repeat_num)            
+            # print("query_states shape", query_states.shape, key_states.shape, value_states.shape)
+
+            # Reashape to the expected shape for Flash Attention
+            query_states = query_states.transpose(1, 2)
+            key_states = key_states.transpose(1, 2)
+            value_states = value_states.transpose(1, 2)
+
+            attn_output = self._flash_attention_forward(
+                query_states,
+                key_states,
+                value_states,
+                attention_mask,
+                this_q_len,
+                dropout=dropout_rate,
+                use_sliding_windows=use_sliding_windows,
+            )      
+
+            attn_output = attn_output.reshape(bsz, this_q_len, self.num_key_value_groups * self.head_dim).contiguous()
+            attn_output = self.o_proj[expert_idx](attn_output)
+            attn_output = attn_output[current_batch_ids, current_seq_ids] * (routing_weights[top_x, idx, None] * self.scale_factor_attn)
+
+            final_attn_output.index_add_(0, top_x, attn_output)
+
+        final_attn_output = final_attn_output.reshape(bsz, q_len, hidden_dim)
+
+        if not output_attentions:
+            attn_weights = None
+        
+        return final_attn_output, attn_weights, past_key_value, router_logits  # 🔍 return an extra `router_logits`
+
+
+
+class MixtralFlashAttention2MoE_zt(MixtralFlashAttention2):
+    def __init__(self, *args, **kwargs):
+        super().__init__(*args, **kwargs)
+
+        self.top_k_attn = self.config.top_k_attn
+        self.scale_factor_attn = self.config.scale_factor_attn
+        # self.num_heads
+        # self.head_dim
+        # self.num_key_value_heads
+        # self.num_key_value_groups  # total number of experts
+        assert self.top_k_attn <= self.num_key_value_groups
+        # assert self.top_k_attn % self.num_key_value_heads == 0
+        self.attn_hsz = self.hidden_size // self.num_key_value_groups * self.top_k_attn
+        self.kv_repeat_num = self.attn_hsz // (self.num_key_value_heads * self.head_dim)
+        self.simulated_attn_head_num = self.attn_hsz // self.head_dim
+        assert self.attn_hsz % (self.num_key_value_heads * self.head_dim) == 0
+        assert self.simulated_attn_head_num == self.num_heads * (self.top_k_attn / self.num_key_value_groups)
+        assert self.kv_repeat_num * self.num_key_value_heads == self.simulated_attn_head_num
+
+        self.gate = nn.Linear(self.hidden_size, self.num_key_value_groups, bias=False)
+        # tzhu: there are self.num_key_value_groups experts
+        #       each expert has a size of self.attn_hsz
+        self.q_proj = nn.ModuleList(
+            [nn.Linear(self.hidden_size, self.attn_hsz) for _ in range(self.num_key_value_groups)]
+        )
+        self.o_proj = nn.ModuleList(
+            [nn.Linear(self.attn_hsz, self.hidden_size) for _ in range(self.num_key_value_groups)]
+        )
+
+    def forward(
+        self,
+        hidden_states: torch.Tensor,
+        attention_mask: Optional[torch.Tensor] = None,
+        position_ids: Optional[torch.LongTensor] = None,
+        past_key_value: Optional[Cache] = None,
+        output_attentions: bool = False,
+        use_cache: bool = False,
+        **kwargs,
+    ):
+        if "padding_mask" in kwargs:
+            warnings.warn(
+                "Passing `padding_mask` is deprecated and will be removed in v4.37. Please make sure use `attention_mask` instead.`"
+            )
+
+            # overwrite attention_mask with padding_mask
+            attention_mask = kwargs.pop("padding_mask")
+        bsz, q_len, _ = hidden_states.size()
+
+        key_states = self.k_proj(hidden_states)
+        value_states = self.v_proj(hidden_states)
+
+        # tzhu: attn-moe on q_proj
+        viewed_hidden_states = hidden_states.view(bsz * q_len, self.hidden_size)
+        # router
+        router_logits = self.gate(viewed_hidden_states)
+        router_scores = F.softmax(router_logits, dim=-1, dtype=torch.float)
+        routing_weights, selected_experts = torch.topk(router_scores, self.top_k_attn, dim=-1)
+        routing_weights /= routing_weights.sum(dim=-1, keepdim=True)
+        routing_weights = routing_weights.to(hidden_states.dtype)
+        query_states = torch.zeros(
+            (bsz * q_len, self.attn_hsz),
+            dtype=hidden_states.dtype,
+            device=hidden_states.device,
+        )
+        # expert_mask: (num_experts, top_k_attn, bsz * q_len)
+        expert_mask = F.one_hot(selected_experts, num_classes=self.num_heads).permute(2, 1, 0)
+        for expert_idx in range(self.num_key_value_groups):
+            expert_layer = self.q_proj[expert_idx]
+            idx, top_x = torch.where(expert_mask[expert_idx])
+            top_x_list = top_x.tolist()
+            idx_list = idx.tolist()
+            expert_inputs = viewed_hidden_states[None, top_x_list].reshape(-1, self.hidden_size)
+            # inputs (-1, hidden_size) -> outputs (-1, attn_hsz)
+            expert_outs = expert_layer(expert_inputs) * routing_weights[top_x_list, idx_list, None] * self.scale_factor_attn
+            query_states.index_add_(0, top_x, expert_outs.to(query_states.dtype))
+        query_states = query_states.view(bsz, q_len, self.attn_hsz)
+        # query_states = query_states.view(
+        #     bsz, q_len, self.num_heads, self.simulated_attn_head_num
+        # ).transpose(1, 2)
+        query_states = query_states.view(
+            bsz, q_len, self.simulated_attn_head_num, self.head_dim
+        ).transpose(1, 2)
+        key_states = key_states.view(
+            bsz, q_len, self.num_key_value_heads, self.head_dim
+        ).transpose(1, 2)
+        value_states = value_states.view(
+            bsz, q_len, self.num_key_value_heads, self.head_dim
+        ).transpose(1, 2)
+
+        kv_seq_len = key_states.shape[-2]
+        if past_key_value is not None:
+            if self.layer_idx is None:
+                raise ValueError(
+                    f"The cache structure has changed since version v4.36. If you are using {self.__class__.__name__} "
+                    "for auto-regressive decoding with k/v caching, please make sure to initialize the attention class "
+                    "with a layer index."
+                )
+            kv_seq_len += past_key_value.get_usable_length(kv_seq_len, self.layer_idx)
+
+        # Because the input can be padded, the absolute sequence length depends on the max position id.
+        rotary_seq_len = max(kv_seq_len, position_ids[:, -1].max().item()) + 1
+        cos, sin = self.rotary_emb(value_states, seq_len=rotary_seq_len)
+
+        query_states, key_states = apply_rotary_pos_emb(
+            query_states, key_states, cos, sin, position_ids
+        )
+
+        use_sliding_windows = (
+            _flash_supports_window_size
+            and getattr(self.config, "sliding_window", None) is not None
+            and kv_seq_len > self.config.sliding_window
+        )
+
+        if not _flash_supports_window_size:
+            logger.warning_once(
+                "The current flash attention version does not support sliding window attention, for a more memory efficient implementation"
+                " make sure to upgrade flash-attn library."
+            )
+
+        if past_key_value is not None:
+            # Activate slicing cache only if the config has a value `sliding_windows` attribute
+            cache_has_contents = past_key_value.get_seq_length(self.layer_idx) > 0
+            if (
+                getattr(self.config, "sliding_window", None) is not None
+                and kv_seq_len > self.config.sliding_window
+                and cache_has_contents
+            ):
+                slicing_tokens = 1 - self.config.sliding_window
+
+                past_key = past_key_value[self.layer_idx][0]
+                past_value = past_key_value[self.layer_idx][1]
+
+                past_key = past_key[:, :, slicing_tokens:, :].contiguous()
+                past_value = past_value[:, :, slicing_tokens:, :].contiguous()
+
+                if past_key.shape[-2] != self.config.sliding_window - 1:
+                    raise ValueError(
+                        f"past key must have a shape of (`batch_size, num_heads, self.config.sliding_window-1, head_dim`), got"
+                        f" {past_key.shape}"
+                    )
+
+                if attention_mask is not None:
+                    attention_mask = attention_mask[:, slicing_tokens:]
+                    attention_mask = torch.cat(
+                        [attention_mask, torch.ones_like(attention_mask[:, -1:])],
+                        dim=-1,
+                    )
+
+            cache_kwargs = {"sin": sin, "cos": cos}  # Specific to RoPE models
+            key_states, value_states = past_key_value.update(
+                key_states, value_states, self.layer_idx, cache_kwargs
+            )
+
+        # repeat k/v heads if n_kv_heads < n_heads
+        key_states = repeat_kv(key_states, self.kv_repeat_num)
+        value_states = repeat_kv(value_states, self.kv_repeat_num)
+        dropout_rate = 0.0 if not self.training else self.attention_dropout
+
+        # In PEFT, usually we cast the layer norms in float32 for training stability reasons
+        # therefore the input hidden states gets silently casted in float32. Hence, we need
+        # cast them back in float16 just to be sure everything works as expected.
+        input_dtype = query_states.dtype
+        if input_dtype == torch.float32:
+            # Handle the case where the model is quantized
+            if hasattr(self.config, "_pre_quantization_dtype"):
+                target_dtype = self.config._pre_quantization_dtype
+            else:
+                target_dtype = self.q_proj.weight.dtype
+
+            logger.warning_once(
+                f"The input hidden states seems to be silently casted in float32, this might be related to"
+                f" the fact you have upcasted embedding or layer norm layers in float32. We will cast back the input in"
+                f" {target_dtype}."
+            )
+
+            query_states = query_states.to(target_dtype)
+            key_states = key_states.to(target_dtype)
+            value_states = value_states.to(target_dtype)
+
+        # Reashape to the expected shape for Flash Attention
+        query_states = query_states.transpose(1, 2)
+        key_states = key_states.transpose(1, 2)
+        value_states = value_states.transpose(1, 2)
+
+        attn_output = self._flash_attention_forward(
+            query_states,
+            key_states,
+            value_states,
+            attention_mask,
+            q_len,
+            dropout=dropout_rate,
+            use_sliding_windows=use_sliding_windows,
+        )
+
+        attn_output = attn_output.reshape(bsz * q_len, self.attn_hsz).contiguous()
+        final_attn_output = torch.zeros(
+            (bsz * q_len, self.hidden_size),
+            dtype=hidden_states.dtype,
+            device=hidden_states.device,
+        )
+        for expert_idx in range(self.num_key_value_groups):
+            expert_layer = self.o_proj[expert_idx]
+            idx, top_x = torch.where(expert_mask[expert_idx])
+            top_x_list = top_x.tolist()
+            idx_list = idx.tolist()
+            expert_inputs = attn_output[None, top_x_list].reshape(-1, self.attn_hsz)
+            expert_outs = expert_layer(expert_inputs) * routing_weights[top_x_list, idx_list, None] * self.scale_factor_attn
+            final_attn_output.index_add_(0, top_x, expert_outs.to(final_attn_output.dtype))
+        final_attn_output = final_attn_output.view(bsz, q_len, self.hidden_size)
+
+        if not output_attentions:
+            attn_weights = None
+
+        return final_attn_output, attn_weights, past_key_value, router_logits
+
+
+    @torch.no_grad()
+    def from_vanilla_attention(attention: MixtralAttention, top_k_attn, scale_factor_attn):
+        # config
+        layer_idx = attention.layer_idx
+        config = attention.config
+        config.top_k_attn = top_k_attn
+        config.scale_factor_attn = scale_factor_attn
+
+        # init
+        attention_moe = MixtralFlashAttention2MoE(config, layer_idx)
+
+        # copy weights
+        num_key_value_groups = attention_moe.num_key_value_groups
+        head_dim = attention_moe.head_dim
+
+        for i in range(num_key_value_groups):
+            indices_q_o = []
+            for j in range(attention_moe.num_key_value_heads):
+                k = i + j * num_key_value_groups
+                indices_q_o.extend(
+                    list(range(k * head_dim, (k + 1) * head_dim))
+                )
+
+            print(i, "indices_q_o", indices_q_o)
+
+            attention_moe.q_proj[i].weight.data = attention.q_proj.weight.data[indices_q_o].clone()
+            attention_moe.o_proj[i].weight.data = attention.o_proj.weight.data[:, indices_q_o].clone()
+
+        return attention_moe
+
+
+
+
 class MixtralBLockSparseTop2MLP(nn.Module):
     def __init__(self, config: MixtralConfig, ffn_dim, add_rescale_bias=False):  # 🔍
         super().__init__()
@@ -1419,7 +1921,7 @@ MISTRAL_ATTENTION_CLASSES = {
 # 🔍
 MISTRAL_ATTENTION_MOE_CLASSES = {
     "eager": MixtralAttentionMoE,
-    "flash_attention_2": None,
+    "flash_attention_2": MixtralFlashAttention2MoE,
 }
 
 
@@ -2222,7 +2724,7 @@ class MixtralForCausalLM(MixtralPreTrainedModel):
             if len(valid_attn_router_logits) > 0:  # exist logits that is not None
                 attn_aux_loss = load_balancing_loss_func(
                     valid_attn_router_logits,
-                    self.config.num_key_value_heads,
+                    self.config.attn_experts,
                     self.config.top_k_attn,
                     use_layer_wise_balance=self.config.use_layer_wise_balance,  # ✨
                 )
