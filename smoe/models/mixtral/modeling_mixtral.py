@@ -966,7 +966,7 @@ class MixtralAttentionMoE(MixtralAttention):
                     temp_attention_mask = attention_mask[:, previous_seen_tokens_total:].flatten()  # select along dimension 1 so that we get tokens in this iteration
                 else:
                     temp_attention_mask = attention_mask.flatten()  # flatten the dim
-                current_attention_mask[current_batch_ids, current_seq_ids] = temp_attention_mask[top_x]  # assign masks sparsely
+                current_attention_mask[current_batch_ids, current_seq_ids] = temp_attention_mask[top_x].bool()  # assign masks sparsely
 
             else:
                 current_attention_mask[current_batch_ids, current_seq_ids] = True  # assign masks sparsely
@@ -1390,15 +1390,17 @@ class MixtralFlashAttention2MoE(MixtralFlashAttention2):
         super().__init__(*args, **kwargs)
 
         self.top_k_attn = self.config.top_k_attn
+        self.attn_experts = self.config.attn_experts
         self.scale_factor_attn = self.config.scale_factor_attn
+        self.split_ratio = self.attn_experts // self.num_key_value_heads
 
-        self.gate = nn.Linear(self.hidden_size, self.num_key_value_heads, bias=False)
+        self.gate = nn.Linear(self.hidden_size, self.attn_experts, bias=False)
 
-        self.q_proj = nn.ModuleList([nn.Linear(self.hidden_size, self.num_key_value_groups * self.head_dim, bias=False) for _ in range(self.num_key_value_heads)])
-        self.k_proj = nn.ModuleList([nn.Linear(self.hidden_size, self.head_dim, bias=False) for _ in range(self.num_key_value_heads)])
-        self.v_proj = nn.ModuleList([nn.Linear(self.hidden_size, self.head_dim, bias=False) for _ in range(self.num_key_value_heads)])
-        self.o_proj = nn.ModuleList([nn.Linear(self.num_key_value_groups * self.head_dim, self.hidden_size, bias=self.config.add_rescale_bias) for _ in range(self.num_key_value_heads)]) 
-    
+        self.q_proj = nn.ModuleList([nn.Linear(self.hidden_size, self.num_key_value_groups * self.head_dim // self.split_ratio, bias=False) for _ in range(self.attn_experts)])
+        self.k_proj = nn.ModuleList([nn.Linear(self.hidden_size, self.head_dim, bias=False) for _ in range(self.attn_experts)])
+        self.v_proj = nn.ModuleList([nn.Linear(self.hidden_size, self.head_dim, bias=False) for _ in range(self.attn_experts)])
+        self.o_proj = nn.ModuleList([nn.Linear(self.num_key_value_groups * self.head_dim // self.split_ratio, self.hidden_size, bias=self.config.add_rescale_bias) for _ in range(self.attn_experts)]) 
+
     def forward(
         self,
         hidden_states: torch.Tensor,
@@ -1439,14 +1441,16 @@ class MixtralFlashAttention2MoE(MixtralFlashAttention2):
 
         expert_mask = F.one_hot(selected_experts, num_classes=self.num_heads).permute(2, 1, 0)
 
-        # all_attn_weights = [] if output_attentions else None
+        all_attn_weights = [] if output_attentions else None
         
-        for expert_idx in range(self.num_key_value_heads):
+        for expert_idx in range(self.attn_experts):
             idx, top_x = torch.nonzero(expert_mask[expert_idx], as_tuple=True)
             # top_x_list = top_x.tolist()
             # idx_list = idx.tolist()
 
             if top_x.shape[0] == 0 and not self.training:  # skip during training will lead to asynchrony among different GPUs and blocks the training!
+                if output_attentions:
+                    all_attn_weights.append(None)
                 continue
 
             # create position_ids for selected tokens
@@ -1470,11 +1474,11 @@ class MixtralFlashAttention2MoE(MixtralFlashAttention2):
             # expert_inputs = viewed_hidden_states[None, top_x_list].reshape(-1, self.hidden_size)
 
             query_states = self.q_proj[expert_idx](current_state)
-            key_states = self.k_proj[expert_idx](current_state) 
-            value_states = self.v_proj[expert_idx](current_state) 
+            key_states = self.k_proj[expert_idx](current_state)
+            value_states = self.v_proj[expert_idx](current_state)
 
             # seq_len = query_states.numel() // (bsz * self.num_key_value_groups * self.head_dim)
-            query_states = query_states.view(bsz, -1, self.num_key_value_groups, self.head_dim).transpose(1, 2)
+            query_states = query_states.view(bsz, -1, self.num_key_value_groups // self.split_ratio, self.head_dim).transpose(1, 2)
             key_states = key_states.view(bsz, -1, 1, self.head_dim).transpose(1, 2)
             value_states = value_states.view(bsz, -1, 1, self.head_dim).transpose(1, 2)
 
@@ -1591,7 +1595,7 @@ class MixtralFlashAttention2MoE(MixtralFlashAttention2):
                 if hasattr(self.config, "_pre_quantization_dtype"):
                     target_dtype = self.config._pre_quantization_dtype
                 else:
-                    target_dtype = self.q_proj.weight.dtype
+                    target_dtype = self.q_proj[0].weight.dtype
 
                 logger.warning_once(
                     f"The input hidden states seems to be silently casted in float32, this might be related to"
@@ -1627,7 +1631,7 @@ class MixtralFlashAttention2MoE(MixtralFlashAttention2):
                 use_sliding_windows=use_sliding_windows,
             )      
 
-            attn_output = attn_output.reshape(bsz, this_q_len, self.num_key_value_groups * self.head_dim).contiguous()
+            attn_output = attn_output.reshape(bsz, this_q_len, self.num_key_value_groups * self.head_dim // self.split_ratio).contiguous()
             attn_output = self.o_proj[expert_idx](attn_output)
             attn_output = attn_output[current_batch_ids, current_seq_ids] * (routing_weights[top_x, idx, None] * self.scale_factor_attn)
 
@@ -3133,7 +3137,8 @@ class MixtralForCausalLM(MixtralPreTrainedModel):
             if past is None:
                 if self.config.use_attn_moe:  # 🔍
                     model_kwargs["past_key_values"] = MoECache(
-                        self.config.num_key_value_heads
+                        # self.config.num_key_value_heads
+                        self.config.attn_experts
                     )
                 else:  # 🔍
                     model_kwargs["past_key_values"] = DynamicCache()
