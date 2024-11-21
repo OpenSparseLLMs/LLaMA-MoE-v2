@@ -1,7 +1,5 @@
 import math
 import os.path
-import math
-import os.path
 import re
 import shutil
 from collections import defaultdict
@@ -10,7 +8,6 @@ from pathlib import Path
 import torch
 from safetensors import safe_open
 from safetensors.torch import save_file
-from torch.nn import init
 from torch.nn import init
 from transformers.modeling_utils import dtype_byte_size
 
@@ -27,20 +24,10 @@ def is_safetensors_file(filepath):
 
 
 FFN_TYPE_MAP = {
-    "megablocks": {
-        "gate": "w1",
-        "down": "w2",
-        "up": "v1",
-    },
     "modulelist": {
         "gate": "w1",
         "down": "w2",
         "up": "w3",
-    },
-    "scattermoe": {
-        "gate": "experts#2",
-        "down": "output_experts",
-        "up": "experts#1",
     },
 }
 
@@ -101,7 +88,6 @@ def convert_safetensors(
     total_size = 0
     total_gate_size = 0
     visited_layers = set()
-    scattermoe_upgate_tensors = defaultdict(dict)
     for fi, filepath in enumerate(tensor_filepaths):
         with safe_open(filepath, framework="pt", device="cpu") as f:
             tensors = {}
@@ -144,21 +130,7 @@ def convert_safetensors(
                         new_ffn_type = ffn_type_map[ffn_type]
 
                         # initialize expert weights
-                        if moe_type == "megablocks":
-                            states_dict_name = f"model.layers.{layer_idx}.block_sparse_moe.experts.mlp.{new_ffn_type}"
-                            if mid_idx == 1:
-                                tensor = tensor.view(mid, hsz)
-                            if neuron_indices is None:  # sequential split
-                                tensors[states_dict_name] = tensor
-                            else:  # split according to the given indices
-                                this_layer_indices: list = neuron_indices[layer_idx]
-                                expert_size = mid // num_experts
-                                tensors[states_dict_name] = torch.zeros_like(tensor)
-                                for expert_idx in range(num_experts):
-                                    print(f"Initializing layer {layer_idx} expert {expert_idx} {ffn_type} using neurons with indices {this_layer_indices[expert_idx]}...")
-                                    tensors[states_dict_name][expert_idx * expert_size: (expert_idx + 1) * expert_size] = tensor[this_layer_indices[expert_idx]].clone()
-
-                        elif moe_type == "modulelist":
+                        if moe_type == "modulelist":
                             expert_size = mid // num_experts
                             for expert_idx in range(num_experts):
                                 if mid_idx == 0:
@@ -179,31 +151,6 @@ def convert_safetensors(
                                     f"model.layers.{layer_idx}.block_sparse_moe.experts.{expert_idx}.{new_ffn_type}.weight"
                                 ] = expert_tensor
 
-                        elif moe_type == "scattermoe":
-                            if mid_idx == 1:
-                                tensor = tensor.view(mid, hsz)
-
-                            expert_size = mid // num_experts
-                            if neuron_indices is None:  # sequential split
-                                tensor = tensor.view(num_experts, expert_size, hsz)
-                            else:  # split according to the given indices
-                                this_layer_indices: list = neuron_indices[layer_idx]
-                                temp_tensor = torch.zeros((num_experts, expert_size, hsz), device=tensor.device, dtype=tensor.dtype)
-                                for expert_idx in range(num_experts):
-                                    print(f"Initializing layer {layer_idx} expert {expert_idx} {ffn_type} using neurons with indices {this_layer_indices[expert_idx]}...")
-                                    temp_tensor[expert_idx] = tensor[this_layer_indices[expert_idx]].clone()
-                                tensor = temp_tensor
-
-                            if new_ffn_type == "output_experts":
-                                tensors[
-                                    f"model.layers.{layer_idx}.block_sparse_moe.experts.{new_ffn_type}.weight"
-                                ] = tensor.permute(0, 2, 1)
-                            elif new_ffn_type == "experts#1":
-                                scattermoe_upgate_tensors[layer_idx][0] = tensor
-                            elif new_ffn_type == "experts#2":
-                                scattermoe_upgate_tensors[layer_idx][1] = tensor
-                            else:
-                                raise KeyError
                         else:
                             raise NotImplementedError
 
@@ -212,28 +159,6 @@ def convert_safetensors(
 
                 else:
                     tensors[key] = tensor
-
-            if moe_type == "scattermoe":
-                # for the last file, take all the rest of the layers
-                if fi == len(tensor_filepaths) - 1:
-                    contained_layers = (
-                            set(scattermoe_upgate_tensors.keys()) - visited_layers
-                    )
-
-                for layer_idx in contained_layers:
-                    upgate_tensors = scattermoe_upgate_tensors[layer_idx]
-                    try:
-                        up = upgate_tensors[0]
-                        gate = upgate_tensors[1]
-                        upgate = torch.cat([up, gate], dim=1)
-                        tensors[
-                            f"model.layers.{layer_idx}.block_sparse_moe.experts.experts.weight"
-                        ] = upgate
-                        visited_layers.add(layer_idx)
-                    except KeyError:
-                        print(
-                            f"layer {layer_idx} has no up or gate tensors in {filepath.name}, skipping..."
-                        )
 
             for key in tensors:
                 tensors[key] = tensors[key].contiguous()
@@ -264,7 +189,6 @@ if __name__ == "__main__":
     src_model_dir = "/mnt/petrelfs/share_data/quxiaoye/models/Meta-Llama-3-8B"
     tgt_model_dir_prefix = f"/mnt/petrelfs/share_data/quxiaoye/llama_moe_v2/converted_models/base-split-sequential-Top{top_k}"
 
-    # tgt_moe_types = ["modulelist", "megablocks", "scattermoe"]
     tgt_moe_types = ["modulelist"]
 
     neuron_indices_file = ""

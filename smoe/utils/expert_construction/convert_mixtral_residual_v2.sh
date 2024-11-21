@@ -16,7 +16,7 @@
 {
   model_path="/mnt/petrelfs/quxiaoye/models/Meta-Llama-3-8B-Instruct"
 
-  moe_implementation_type="modulelist" #  modulelist megablocks scattermoe
+  moe_implementation_type="modulelist"
   num_experts=7
   top_k=1
 
@@ -28,7 +28,7 @@
   neuron_indices_file="/mnt/petrelfs/quxiaoye/models/${split_folder_name}/neuron_indices.pt"
   gate_weights_file="/mnt/petrelfs/quxiaoye/models/gate_weights.pt"
 
-  srun python smoe/entrypoint/expert_construction_v2/convert/convert_mixtral_residual_v2.py \
+  srun python smoe/entrypoint/expert_construction/convert/convert_mixtral_residual_v2.py \
     --model_path ${model_path} \
     --save_path ${save_path} \
     --neuron_indices_file ${neuron_indices_file} \

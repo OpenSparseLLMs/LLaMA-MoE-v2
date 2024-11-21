@@ -81,7 +81,6 @@ def convert_residual_safetensors(
     total_size = 0
     total_gate_size = 0
     visited_layers = set()
-    scattermoe_upgate_tensors = defaultdict(dict)
     for fi, filepath in enumerate(tensor_filepaths):
         with safe_open(filepath, framework="pt", device="cpu") as f:
             tensors = {}
@@ -135,17 +134,7 @@ def convert_residual_safetensors(
                         tensors[f"model.layers.{layer_idx}.mlp_residual.{new_ffn_type}.weight"] = expert_tensor
 
                         # add moe weights
-                        if moe_type == "megablocks":
-                            states_dict_name = f"model.layers.{layer_idx}.block_sparse_moe.experts.mlp.{new_ffn_type}"
-                            if mid_idx == 1:
-                                tensor = tensor.view(mid, hsz)
-                            expert_size = mid // num_experts
-                            tensors[states_dict_name] = torch.zeros_like(tensor)
-                            for expert_idx in range(num_experts):
-                                print(f"Initializing layer {layer_idx} expert {expert_idx} {ffn_type} using neurons with indices {this_layer_indices[expert_idx]}...")
-                                tensors[states_dict_name][expert_idx * expert_size: (expert_idx + 1) * expert_size] = tensor[this_layer_indices[expert_idx]].clone()
-
-                        elif moe_type == "modulelist":
+                        if moe_type == "modulelist":
                             for expert_idx in range(num_experts):
                                 print(f"Initializing layer {layer_idx} expert {expert_idx} {ffn_type} using neurons with indices {this_layer_indices[expert_idx]}...")
                                 if mid_idx == 0:
@@ -155,28 +144,6 @@ def convert_residual_safetensors(
                                 tensors[
                                     f"model.layers.{layer_idx}.block_sparse_moe.experts.{expert_idx}.{new_ffn_type}.weight"
                                 ] = expert_tensor
-
-                        elif moe_type == "scattermoe":
-                            if mid_idx == 1:
-                                tensor = tensor.view(mid, hsz)
-
-                            expert_size = mid // num_experts
-                            temp_tensor = torch.zeros((num_experts, expert_size, hsz), device=tensor.device, dtype=tensor.dtype)
-                            for expert_idx in range(num_experts):
-                                print(f"Initializing layer {layer_idx} expert {expert_idx} {ffn_type} using neurons with indices {this_layer_indices[expert_idx]}...")
-                                temp_tensor[expert_idx] = tensor[this_layer_indices[expert_idx]].clone()
-                            tensor = temp_tensor
-
-                            if new_ffn_type == "output_experts":
-                                tensors[
-                                    f"model.layers.{layer_idx}.block_sparse_moe.experts.{new_ffn_type}.weight"
-                                ] = tensor.permute(0, 2, 1)
-                            elif new_ffn_type == "experts#1":
-                                scattermoe_upgate_tensors[layer_idx][0] = tensor
-                            elif new_ffn_type == "experts#2":
-                                scattermoe_upgate_tensors[layer_idx][1] = tensor
-                            else:
-                                raise KeyError
                         else:
                             raise NotImplementedError
 
@@ -184,28 +151,6 @@ def convert_residual_safetensors(
                         tensors[key] = tensor
                 else:
                     tensors[key] = tensor
-
-            if moe_type == "scattermoe":
-                # for the last file, take all the rest of the layers
-                if fi == len(tensor_filepaths) - 1:
-                    contained_layers = (
-                            set(scattermoe_upgate_tensors.keys()) - visited_layers
-                    )
-
-                for layer_idx in contained_layers:
-                    upgate_tensors = scattermoe_upgate_tensors[layer_idx]
-                    try:
-                        up = upgate_tensors[0]
-                        gate = upgate_tensors[1]
-                        upgate = torch.cat([up, gate], dim=1)
-                        tensors[
-                            f"model.layers.{layer_idx}.block_sparse_moe.experts.experts.weight"
-                        ] = upgate
-                        visited_layers.add(layer_idx)
-                    except KeyError:
-                        print(
-                            f"layer {layer_idx} has no up or gate tensors in {filepath.name}, skipping..."
-                        )
 
             for key in tensors:
                 tensors[key] = tensors[key].contiguous()
@@ -235,7 +180,6 @@ if __name__ == "__main__":
     src_model_dir = "/mnt/petrelfs/share_data/quxiaoye/models/Meta-Llama-3-8B"
     tgt_model_dir_prefix = f"/mnt/petrelfs/shared_data/quxioaye/llama_moe_v2/converted_models/base-split-sequential-Top{top_k}"
 
-    # tgt_moe_types = ["modulelist", "megablocks", "scattermoe"]
     tgt_moe_types = ["modulelist"]
 
     neuron_indices_file = ""

@@ -1,26 +1,36 @@
-# Expert Construction of LLaMA Model
+# Expert Construction of LLaMA-MoE-V2
 
-This documentation provides the procedures to convert a LLaMA model to LLaMA-MoE.
-
-
-
-## Procedures
-
-The conversion from LLaMA to LLaMA-MoE consists of two steps:
-
-1. **Split.** Create indices sets $S_1,S_2,\dots,S_n$ (Eq. 5 in the technical report) for the each FFN layer in LLaMA. The indices sets indicate the intermediate neurons that should be assigned to experts. Save the indices sets to disk.
-2. **Convert.** Create a LLaMA-MoE model from an existing LLaMA checkpoint. Reinitialize the LLaMA-MoE experts by selecting the corressponding neurons in the indices sets. Save the initialized LLaMA-MoE model to disk.
+This documentation provides the procedures to convert a LLaMA model to LLaMA-MoE-V2.
 
 
 
-### Split
+## 1. Get Router Weights
 
-#### 1. Random Split (Neuron-Independent)
+### K-means Centroids
 
-To randomly split the intermediate neurons in FFNs, you can run:
+Get the router weights through k-means clustering on the `hidden_states` of all layer inputs by running:
+
+```bash
+sbatch scripts/expert_construction/get_gates/hidden_clustering.sh
+```
+Remember to change the following variables:
 
 ```shell
-bash ./scripts/expert_construction/split/run_split_random.sh
+num_experts="" # number of experts in each MoE layer
+balance_jitter_factor="" # hyper-parameter for adjusting the cluster size
+distance_metric="" # metric for clustering, choices: `l2` `cos`
+
+dataset_dir_or_path="" # path to dataset directory or a single jsonl file
+model_path="" # path to the LLaMA checkpoint
+output_dir="" # path to save the indices sets
+```
+
+### Random Features
+
+Get the router weights through random selection of `hidden_states` among all layer inputs by running:
+
+```bash
+sbatch scripts/expert_construction/get_gates/random_selection.sh
 ```
 
 Remember to change the following variables:
@@ -28,242 +38,218 @@ Remember to change the following variables:
 ```shell
 num_experts="" # number of experts in each MoE layer
 
+dataset_dir_or_path="" # path to dataset directory or a single jsonl file
 model_path="" # path to the LLaMA checkpoint
-save_path="" # path to save the indices sets
+output_dir="" # path to save the indices sets
 ```
 
+## 2. Split Neurons
 
+### Gradient Split Plus
 
-#### 2. Clustering Split (Neuron-Independent)
+This strategy splits the neurons according to their importance scores on different token batches.
 
-To split the intermediate neurons in FFNs by k-means clustering, you can run:
+You should first run the following script to get the importance scores of all experts:
+
+(Remember to pass the `--folder_name` argument, where the file is generated from the *Get Router Weights* step.)
+
+```bash
+sbatch scripts/expert_construction/split/split_gradient_get_grads_v2.sh
+```
+
+Remember to change the following variables:
 
 ```shell
-bash ./scripts/expert_construction/split/run_split_clustering.sh
+dataset_dir_or_path="" # path to dataset directory or a single jsonl file
+model_path="" # path to the LLaMA checkpoint
+folder_name="" # name to router weights file
+gate_weights_file="" # path to the router weights file generated above
+output_dir="" # path to save the indices sets
 ```
+
+
+Then, you can run the following scripts to get the indices splits accordingly:
+
+(Remember to pass the `--score_file` argument, where the file is generated from the above step.)
+
+| MoE Type | Script                                                       |
+| -------- | ------------------------------------------------------------ |
+| Vanilla  | `sbatch scripts/expert_construction/split/split_gradient_v2.sh` |
+| Residual | `sbatch scripts/expert_construction/split/split_gradient_residual_v2.sh` |
+
+Remember to change the following variables:
+
+```shell
+# Vanilla
+model_path="" # path to the LLaMA checkpoint
+num_experts="" # number of experts in each MoE layer
+score_file="" # path to importance scores file generated above
+output_dir="" # path to save the indices sets
+
+# Residual
+model_path="" # path to the LLaMA checkpoint
+num_experts_moe="" # number of experts in each MoE layer
+num_experts_residual="" # number of residual experts in each MoE layer
+score_file="" # path to importance scores file generated above
+output_dir="" # path to save the indices sets
+```
+
+
+## 3. Convert MoE
+
+### Convert to Vanilla LLaMA-MoE-V2
+
+Just run the following script:
+
+```bash
+sbatch scripts/expert_construction/convert/convert_mixtral_v2.sh
+```
+
+There are some arguments that you should notice:
+
+- **`--gate_weights_file`:** This determines the initialization strategy of routers in the converted MoE model. If not specified, the MLP gates will be initialized randomly using *kaiming initialization*.
+- **`--neuron_indices_file`:** This determines the indices of neurons in the original dense model for converted MLP experts. If not specified, the MLP experts will be split sequentially & uniformly (which is a very naive strategy).
+
+Note that if the *Gradient Split Plus* strategy is used, you must specify `--gate_weights_file` as the path to the gate weights generated in the *Get Router Weights* step, and `--neuron_indices_file` as the generated `neuron_indices.pt` file accordingly.
 
 Remember to change the following variables:
 
 ```shell
 num_experts="" # number of experts in each MoE layer
+top_k="" # number of activate experts in each MoE layer
+scale_factor="" # hyper-parameter for balancing the experts
+num_moe_contract_layers="" # number of MoE Contract Layers
 
 model_path="" # path to the LLaMA checkpoint
+neuron_indices_file="" # path to the gate weights file generated above
+gate_weights_file="" # path to the neuron indices file generated above
 save_path="" # path to save the indices sets
-
-metric="" # metric for clustering, choices: `l2` `cos`
-proj_type="" # weights to perform clustering, choices: `up_proj` `gate_proj`
 ```
 
+### Convert to Residual LLaMA-MoE-V2
 
+This is almost the same as the above. Just run the following script:
 
-#### 3. Co-activation Graph Split (Neuron-Independent)
-
-> This part is not included in our technical report.
->
-> We don’t recommend running this method due to its complexity.
-
-We also implenmented the co-activation graph based method in [MoEfication](https://arxiv.org/abs/2110.01786) here.
-
-You need to install [METIS](http://glaros.dtc.umn.edu/gkhome/metis/metis/download) first. Then you can run to following script to perform splitting:
-
-```shell
-bash ./scripts/expert_construction/get_hidden_features/run_prepare_datasets.sh
-bash ./scripts/expert_construction/get_hidden_features/run_get_hidden_features.sh
-bash ./scripts/expert_construction/split/run_split_graph.sh
+```bash
+sbatch scripts/expert_construction/convert/convert_mixtral_residual_v2.sh
 ```
+
+The only difference is that you should always pass both `--gate_weights_file` and `--neuron_indices_file` arguments, as this script is specifically designed for the *Gradient Split Plus* strategy.
+
+
+### Convert Attention MoE
+
+The conversion of Attention MoE is performed on an existing converted MoE model (where the MLP has already been converted into MoE). You just need to run the following script:
+
+```bash
+sbatch scripts/expert_construction/convert/convert_mixtral_attn_moe.sh
+```
+
+Note that the argument `--model_path` should be pointed to an already converted MoE model.
 
 Remember to change the following variables:
 
 ```shell
-num_experts="" # number of experts in each MoE layer
+top_k_attn="" # number of activate experts in each attention MoE layer
+scale_factor_attn="" # hyper-parameter for balancing the experts
 
-model_path="" # path to the LLaMA checkpoint
+model_path="" # path to the converted MoE checkpoint
+folder_name="" # name to the converted MoE checkpoint
 save_path="" # path to save the indices sets
-
-metric="" # metric to measure the sparsity, choices: `l1_norm` `l2_norm` `plain`
-proj_type="" # outputs to use for constructing co-activation graph, should be set to `up_proj`
 ```
 
 
+## 4. Align Hidden Distribution
 
-#### 4. Gradient Split
+To align a converted MoE model with the original dense model, you need to first get the original feature distribution by running ,
 
-Before performing gradient-based splitting (Eq. 8 in the technical report), you need to prepare a bunch of pretraining data and group them into different clusters by running:
-
-```shell
-python smoe/entrypoint/expert_construction/text_clustering.py
+```bash
+sbatch scripts/expert_construction/align/get_hidden_distribution.sh
 ```
 
-Then, you need to run the following script to get the importance vector $v$ for the intermediate neurons in each layer:
-
-```shell
-bash scripts/expert_construction/split/run_split_gradient_get_grads.sh
-```
+After that, a `distribution.pt` file will be saved to the disk. This file can be reused to align all converted models based on the original dense model, which means that you don’t need to run the script multiple times.
 
 Remember to change the following variables:
 
 ```shell
-dataset_dir="" # path to clustered data
-pretrained_model="" # path to the LLaMA checkpoint
-tokenizer_path="" # path to the LLaMA tokenizer
-save_path="" # path to save the indices sets
-
-accumulate_level="" # should be set to `sample`
-kernel="" # should be set to `l1_norm`
-importance_type="" # should be set to `feature_change`
-```
-
-After that, the importance vector files will be saved to the `save_path` with the following file structure:
-
-```shell
-# this is an example with 16 data clusters
---Gradient16
-	-- llama2_7B-Gradients-l1_norm-sample-feature_change
-        -- 0
-            layers.0.mlp.gate_proj.weight.change # importance on the output of gate_proj
-            layers.0.mlp.up_proj.weight.change # importance on the output of (up_proj * gate_proj)
-            layers.1.mlp.gate_proj.weight.change
-            layers.1.mlp.up_proj.weight.change
-            ...
-        -- 1
-            layers.0.mlp.gate_proj.weight.change
-            layers.0.mlp.up_proj.weight.change
-            layers.1.mlp.gate_proj.weight.change
-            layers.1.mlp.up_proj.weight.change
-            ...
-        ...
-		-- 15
-            layers.0.mlp.gate_proj.weight.change
-            layers.0.mlp.up_proj.weight.change
-            layers.1.mlp.gate_proj.weight.change
-            layers.1.mlp.up_proj.weight.change
-            ...
+folder_name="" # name to the LLaMA checkpoint
+model_path="" # path to the LLaMA checkpoint
+dataset_dir_or_path="" # path to dataset directory or a single jsonl file
+output_dir="" # path to save the indices sets
 ```
 
 
+After obtaining the original distribution, you can run the following script to align a converted MoE model:
 
-##### 4.1 Neuron Independent
-
-> This part is not included in our technical report.
-
-You can also split the intermediate neurons in a neuron-independent manner by treating the expert split as a task assignment problem. To perform the split, you can run:
-
-```shell
-bash ./scripts/expert_construction/split/run_split_gradient.sh
+```bash
+sbatch scripts/expert_construction/align/align_converted_model.sh
 ```
+
+The key arguments to be passed include:
+
+- **`--model_name_or_path`:** Path to the converted MoE model to align.
+- **`--reference_distribution_file`:** The `distribution.pt` file generated by the last step.
 
 Remember to change the following variables:
 
 ```shell
-expert_num="" # number of experts in each MoE layer
-expert_size="" # intermediate neurons in each expert
-share_neurons="False" ######### SET AS FLASE TO BE NEURON-INDEPENDENT #########
-
-model_path="" # path to the LLaMA checkpoint
-score_file_path="" # path to the score files generated above
-save_path="" # path to save the indices sets
-visualization_path="" # path to save the visualization results
-
-criterion="" # criterion to judge the importance of neurons, should be set to `max`
-proj_type="" # importance vector to use, should be set to `up_proj`
+folder_name="" # name to the converted MoE checkpoint
+model_path="" # path to the converted MoE checkpoint
+dataset_dir_or_path="" # path to dataset directory or a single jsonl file
+reference_distribution_file="" # path to reference distribution file generated above
+output_dir="" # path to save the indices sets
 ```
 
+## Example Full Pipeline
 
+### Convert LLaMA into Vanilla LLaMA-MoE-v2 with Gradient Split Plus Strategy
 
-##### 4.2 Inner-Sharing
-
-Here we use the same entrance as the **Neuron Independent** strategy above for gradient split.
-
-```shell
-bash ./scripts/expert_construction/split/run_split_gradient.sh
-```
-
-Remember to change the following variables:
-
-```shell
-expert_num="" # number of experts in each MoE layer
-expert_size="" # intermediate neurons in each expert
-share_neurons="True" ######### SET AS TRUE TO BE INNER-SHARING #########
-
-model_path="" # path to the LLaMA checkpoint
-score_file_path="" # path to the score files generated above
-save_path="" # path to save the indices sets
-visualization_path="" # path to save the visualization results
-
-criterion="" # criterion to judge the importance of neurons, should be set to `max`
-proj_type="" # importance vector to use, should be set to `up_proj`
-```
+| Order | Step                       | Script                                                       |
+| ----- | -------------------------- | ------------------------------------------------------------ |
+| 1     | Get gate weights           | `sbatch scripts/expert_construction/get_gates/hidden_clustering.sh` |
+| 2     | Get neuron importance      | `sbatch scripts/expert_construction/split/split_gradient_get_grads_v2.sh` |
+| 3     | Get neuron indices         | `sbatch scripts/expert_construction/split/split_gradient_v2.sh` |
+| 4     | Convert MLP to vanilla MoE | `sbatch scripts/expert_construction/convert/convert_mixtral_v2.sh` |
+| 5     | Convert Attention to MoE   | `sbatch scripts/expert_construction/convert/convert_mixtral_attn_moe.sh` |
+| 6     | Get Distribution to align  | `sbatch scripts/expert_construction/align/get_hidden_distribution.sh` |
+| 7     | Align the Distribution     | `sbatch scripts/expert_construction/align/align_converted_model.sh` |
 
 
 
-##### 4.3 Inter-Sharing (Residual MoE)
+### Convert LLaMA into Vanilla LLaMA-MoE-v2 Sequentially with Random Gate
 
-You can run the following script to perform inter-sharing split:
+| Order | Step                       | Script                                                       |
+| ----- | -------------------------- | ------------------------------------------------------------ |
+| 1     | Get gate weights           | `sbatch scripts/expert_construction/get_gates/random_selection.sh` |
+| 2     | Get neuron importance      | `sbatch scripts/expert_construction/split/split_gradient_get_grads_v2.sh` |
+| 3     | Get neuron indices         | `sbatch scripts/expert_construction/split/split_gradient_v2.sh` |
+| 4     | Convert MLP to vanilla MoE | `sbatch scripts/expert_construction/convert/convert_mixtral_v2.sh` |
+| 5     | Convert Attention to MoE   | `sbatch scripts/expert_construction/convert/convert_mixtral_attn_moe.sh` |
+| 6     | Get Distribution to align  | `sbatch scripts/expert_construction/align/get_hidden_distribution.sh` |
+| 7     | Align the Distribution     | `sbatch scripts/expert_construction/align/align_converted_model.sh` |
 
-```shell
-bash ./scripts/expert_construction/split/run_split_gradient_residual.sh
-```
+### Convert LLaMA into Residual LLaMA-MoE-v2 with Gradient Split Plus Strategy
 
-Remember to change the following variables:
-
-```shell
-expert_num_moe="" # number of non-residual experts
-expert_num_residual="" # number of residual experts
-expert_size="" # intermediate neurons in each expert
-share_neurons="" # Whether to share neurons in non-residual experts
-
-model_path="" # path to the LLaMA checkpoint
-score_file_path="" # path to the score files generated above
-save_path="" # path to save the indices sets
-visualization_path="" # path to save the visualization results
-
-criterion="" # criterion to judge the importance of neurons, should be set to `max`
-proj_type="" # importance vector to use, should be set to `up_proj`
-```
-
-
-
-### Convert
-
-#### Convert LLaMA-MoE from Neuron-Independent Methods
-
-Run the following script:
-
-```shell
-bash ./scripts/expert_construction/convert/run_convert.sh
-```
+| Order | Step                       | Script                                                       |
+| ----- | -------------------------- | ------------------------------------------------------------ |
+| 1     | Get gate weights           | `sbatch scripts/expert_construction/get_gates/hidden_clustering.sh` |
+| 2     | Get neuron importance      | `sbatch scripts/expert_construction/split/split_gradient_get_grads_v2.sh` |
+| 3     | Get neuron indices         | `sbatch scripts/expert_construction/split/split_gradient_residual_v2.sh` |
+| 4     | Convert MLP to residual MoE | `sbatch scripts/expert_construction/convert/convert_mixtral_residual_v2.sh` |
+| 5     | Convert Attention to MoE   | `sbatch scripts/expert_construction/convert/convert_mixtral_attn_moe.sh` |
+| 6     | Get Distribution to align  | `sbatch scripts/expert_construction/align/get_hidden_distribution.sh` |
+| 7     | Align the Distribution     | `sbatch scripts/expert_construction/align/align_converted_model.sh` |
 
 
 
-#### Convert LLaMA-MoE from Inner-Sharing Methods
+### Convert LLaMA into Residual LLaMA-MoE-v2 Sequentially with Random Gate
 
-Run the following script:
-
-```shell
-bash ./scripts/expert_construction/convert/run_convert_gradient.sh
-```
-
-
-
-#### Convert LLaMA-MoE from Inter-Sharing Methods (Residual MoE)
-
-Run the following script:
-
-```shell
-bash ./scripts/expert_construction/convert/run_convert_gradient_residual.sh
-```
-
-
-
-## File Structure
-
-```shell
---smoe
-	-- scripts
-        -- expert_construction
-            -- convert
-            -- split
-    -- smoe
-        -- entrypoint
-            -- expert_construction
-```
+| Order | Step                       | Script                                                       |
+| ----- | -------------------------- | ------------------------------------------------------------ |
+| 1     | Get gate weights           | `sbatch scripts/expert_construction/get_gates/random_selection.sh` |
+| 2     | Get neuron importance      | `sbatch scripts/expert_construction/split/split_gradient_get_grads_v2.sh` |
+| 3     | Get neuron indices         | `sbatch scripts/expert_construction/split/split_gradient_residual_v2.sh` |
+| 4     | Convert MLP to residual MoE | `sbatch scripts/expert_construction/convert/convert_mixtral_residual_v2.sh` |
+| 5     | Convert Attention to MoE   | `sbatch scripts/expert_construction/convert/convert_mixtral_attn_moe.sh` |
+| 6     | Get Distribution to align  | `sbatch scripts/expert_construction/align/get_hidden_distribution.sh` |
+| 7     | Align the Distribution     | `sbatch scripts/expert_construction/align/align_converted_model.sh` |

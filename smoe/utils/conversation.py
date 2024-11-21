@@ -194,6 +194,29 @@ class Llama3ConversationTemplate(Conversation):
             ret_all += self.eos
         return ret_all, ret_source
 
+    def get_group_prompt(self, add_eos: bool = False) -> str:
+        """Get the prompt for generation."""
+        ret_input = []
+        group = []
+        for role, message in self.messages:
+            ctxt_role = self.fs_to_role[role]
+            if ctxt_role == "user":
+                ret_input.append(
+                    self.message_template_human.format(
+                        role="user", message=message, role2="assistant"
+                    )
+                )
+                group.append("user")
+            # elif ctxt_role == "system":
+            #     ret_input.append(self.message_template_system.format(
+            #         role="system", message=message))
+            elif ctxt_role == "assistant":
+                ret_input.append(self.message_template_gpt.format(message=message))
+                group.append("assistant")
+        if add_eos:
+            ret_input[-1] + self.eos
+        return ret_input, group
+
     @classmethod
     def parse(
         cls, messages: list, skip_system: bool = False, add_eos: bool = False
@@ -205,13 +228,13 @@ class Llama3ConversationTemplate(Conversation):
             conv.append_message(turn["from"], turn["value"])
         # return conv.get_prompt(add_eos=add_eos)
         return conv.get_new_prompt(add_eos=add_eos)
-        
+
     @classmethod
     def parse_list(
         cls, messages_list: list[dict], skip_system: bool = False, add_eos: bool = False
     ) -> str:
         conv = cls()
-        prompt_list, source_part_list = [],[]
+        prompt_list, source_part_list = [], []
         for messages in messages_list:
             conv.clear_msg()
             for j, turn in enumerate(messages):
@@ -223,3 +246,21 @@ class Llama3ConversationTemplate(Conversation):
             source_part_list.append(source_part)
         # return conv.get_prompt(add_eos=add_eos)
         return prompt_list, source_part_list
+
+    @classmethod
+    def parse_group_list(
+        cls, messages_list: list[dict], skip_system: bool = False, add_eos: bool = False
+    ) -> str:
+        conv = cls()
+        prompt_list, groups = [], []
+        for messages in messages_list:
+            conv.clear_msg()
+            for j, turn in enumerate(messages):
+                if skip_system and turn["from"] == "system":
+                    continue
+                conv.append_message(turn["from"], turn["value"])
+            prompt, group = conv.get_group_prompt(add_eos=add_eos)
+            prompt_list.append(prompt)
+            groups.append(group)
+        # return conv.get_prompt(add_eos=add_eos)
+        return prompt_list, groups

@@ -6,18 +6,11 @@ import warnings
 from dataclasses import dataclass
 from typing import Any, Callable, Dict, Iterable, List, Optional, Tuple, Union
 
-import scattermoe
 import stk
 import torch
 import torch.distributed as dist
 import torch.nn.functional as F
 import torch.utils.checkpoint
-from megablocks import grouped_gemm_util as gg
-from megablocks.layers.activation_fn import act_fn
-from megablocks.layers.arguments import Arguments as MegablocksArguments
-from megablocks.layers.dmlp_registry import _REGISTRY
-from megablocks.layers.dmoe import ParallelDroplessMLP
-from megablocks.layers.glu import memory_optimized_grouped_glu
 from packaging import version
 from torch import nn
 from torch.nn import BCEWithLogitsLoss, CrossEntropyLoss, MSELoss
@@ -270,7 +263,9 @@ def load_balancing_loss_func(
     Returns:
         The auxiliary loss.
     """
-    if gate_logits is None or (isinstance(gate_logits, Iterable) and len(gate_logits) == 0):
+    if gate_logits is None or (
+        isinstance(gate_logits, Iterable) and len(gate_logits) == 0
+    ):
         return 0
 
     # ✨ Here is the fix for balance loss in Mixtral.
@@ -966,7 +961,7 @@ class MixtralAttentionMoE(MixtralAttention):
                     temp_attention_mask = attention_mask[:, previous_seen_tokens_total:].flatten()  # select along dimension 1 so that we get tokens in this iteration
                 else:
                     temp_attention_mask = attention_mask.flatten()  # flatten the dim
-                current_attention_mask[current_batch_ids, current_seq_ids] = temp_attention_mask[top_x]  # assign masks sparsely
+                current_attention_mask[current_batch_ids, current_seq_ids] = temp_attention_mask[top_x].bool()  # assign masks sparsely
 
             else:
                 current_attention_mask[current_batch_ids, current_seq_ids] = True  # assign masks sparsely
@@ -1384,21 +1379,50 @@ class MixtralFlashAttention2(MixtralAttention):
         )
 
 
-
 class MixtralFlashAttention2MoE(MixtralFlashAttention2):
     def __init__(self, *args, **kwargs):
         super().__init__(*args, **kwargs)
 
         self.top_k_attn = self.config.top_k_attn
+        self.attn_experts = self.config.attn_experts
         self.scale_factor_attn = self.config.scale_factor_attn
+        self.split_ratio = self.attn_experts // self.num_key_value_heads
 
-        self.gate = nn.Linear(self.hidden_size, self.num_key_value_heads, bias=False)
+        self.gate = nn.Linear(self.hidden_size, self.attn_experts, bias=False)
 
-        self.q_proj = nn.ModuleList([nn.Linear(self.hidden_size, self.num_key_value_groups * self.head_dim, bias=False) for _ in range(self.num_key_value_heads)])
-        self.k_proj = nn.ModuleList([nn.Linear(self.hidden_size, self.head_dim, bias=False) for _ in range(self.num_key_value_heads)])
-        self.v_proj = nn.ModuleList([nn.Linear(self.hidden_size, self.head_dim, bias=False) for _ in range(self.num_key_value_heads)])
-        self.o_proj = nn.ModuleList([nn.Linear(self.num_key_value_groups * self.head_dim, self.hidden_size, bias=self.config.add_rescale_bias) for _ in range(self.num_key_value_heads)]) 
-    
+        self.q_proj = nn.ModuleList(
+            [
+                nn.Linear(
+                    self.hidden_size,
+                    self.num_key_value_groups * self.head_dim // self.split_ratio,
+                    bias=False,
+                )
+                for _ in range(self.attn_experts)
+            ]
+        )
+        self.k_proj = nn.ModuleList(
+            [
+                nn.Linear(self.hidden_size, self.head_dim, bias=False)
+                for _ in range(self.attn_experts)
+            ]
+        )
+        self.v_proj = nn.ModuleList(
+            [
+                nn.Linear(self.hidden_size, self.head_dim, bias=False)
+                for _ in range(self.attn_experts)
+            ]
+        )
+        self.o_proj = nn.ModuleList(
+            [
+                nn.Linear(
+                    self.num_key_value_groups * self.head_dim // self.split_ratio,
+                    self.hidden_size,
+                    bias=self.config.add_rescale_bias,
+                )
+                for _ in range(self.attn_experts)
+            ]
+        )
+
     def forward(
         self,
         hidden_states: torch.Tensor,
@@ -1409,7 +1433,7 @@ class MixtralFlashAttention2MoE(MixtralFlashAttention2):
         use_cache: bool = False,
         **kwargs,
     ):
-        
+
         if "padding_mask" in kwargs:
             warnings.warn(
                 "Passing `padding_mask` is deprecated and will be removed in v4.37. Please make sure use `attention_mask` instead.`"
@@ -1417,12 +1441,14 @@ class MixtralFlashAttention2MoE(MixtralFlashAttention2):
 
             # overwrite attention_mask with padding_mask
             # attention_mask = kwargs.pop("padding_mask")
-        
-        if past_key_value is not None and not isinstance(past_key_value, MoECache):  # 🔍 type check
+
+        if past_key_value is not None and not isinstance(
+            past_key_value, MoECache
+        ):  # 🔍 type check
             raise TypeError(
                 "`past_key_value` must be a `MoECache` instance for attention MoE!"
             )
-        
+
         bsz, q_len, hidden_dim = hidden_states.size()
         device = hidden_states.device
         dtype = hidden_states.dtype
@@ -1431,54 +1457,71 @@ class MixtralFlashAttention2MoE(MixtralFlashAttention2):
         # gate compute
         router_logits = self.gate(hidden_states)
         router_scores = F.softmax(router_logits, dim=1, dtype=torch.float)
-        routing_weights, selected_experts = torch.topk(router_scores, self.top_k_attn, dim=-1)
+        routing_weights, selected_experts = torch.topk(
+            router_scores, self.top_k_attn, dim=-1
+        )
         routing_weights /= routing_weights.sum(dim=-1, keepdim=True)
         routing_weights = routing_weights.to(dtype)
 
         final_attn_output = torch.zeros_like(hidden_states).reshape(-1, hidden_dim)
 
-        expert_mask = F.one_hot(selected_experts, num_classes=self.num_heads).permute(2, 1, 0)
+        expert_mask = F.one_hot(selected_experts, num_classes=self.num_heads).permute(
+            2, 1, 0
+        )
 
-        # all_attn_weights = [] if output_attentions else None
-        
-        for expert_idx in range(self.num_key_value_heads):
+        all_attn_weights = [] if output_attentions else None
+
+        for expert_idx in range(self.attn_experts):
             idx, top_x = torch.nonzero(expert_mask[expert_idx], as_tuple=True)
             # top_x_list = top_x.tolist()
             # idx_list = idx.tolist()
 
-            if top_x.shape[0] == 0 and not self.training:  # skip during training will lead to asynchrony among different GPUs and blocks the training!
+            if (
+                top_x.shape[0] == 0 and not self.training
+            ):  # skip during training will lead to asynchrony among different GPUs and blocks the training!
+                if output_attentions:
+                    all_attn_weights.append(None)
                 continue
 
             # create position_ids for selected tokens
-            current_batch_ids = (top_x // q_len)
-            each_batch_selected_token_num = torch.bincount(current_batch_ids, minlength=bsz)  # (bsz)
+            current_batch_ids = top_x // q_len
+            each_batch_selected_token_num = torch.bincount(
+                current_batch_ids, minlength=bsz
+            )  # (bsz)
             this_q_len = each_batch_selected_token_num.max().item()
 
-            selection_mask = torch.zeros((bsz * q_len,), device=device, dtype=torch.bool)
+            selection_mask = torch.zeros(
+                (bsz * q_len,), device=device, dtype=torch.bool
+            )
             selection_mask[top_x] = True
             selection_mask = selection_mask.reshape(bsz, q_len)
             token_position_indices = torch.cumsum(selection_mask, dim=1) - 1
             token_position_indices = token_position_indices.flatten()
-            current_seq_ids = token_position_indices[top_x] 
-            
+            current_seq_ids = token_position_indices[top_x]
 
             # 🔍 initialize hidden_states for this expert
-            current_state = torch.zeros((bsz, this_q_len, hidden_dim), dtype=dtype, device=device)
-            current_state[current_batch_ids, current_seq_ids] = hidden_states[top_x]  # assign tokens sparsely
+            current_state = torch.zeros(
+                (bsz, this_q_len, hidden_dim), dtype=dtype, device=device
+            )
+            current_state[current_batch_ids, current_seq_ids] = hidden_states[
+                top_x
+            ]  # assign tokens sparsely
 
             # for attention forward
             # expert_inputs = viewed_hidden_states[None, top_x_list].reshape(-1, self.hidden_size)
 
             query_states = self.q_proj[expert_idx](current_state)
-            key_states = self.k_proj[expert_idx](current_state) 
-            value_states = self.v_proj[expert_idx](current_state) 
+            key_states = self.k_proj[expert_idx](current_state)
+            value_states = self.v_proj[expert_idx](current_state)
 
             # seq_len = query_states.numel() // (bsz * self.num_key_value_groups * self.head_dim)
-            query_states = query_states.view(bsz, -1, self.num_key_value_groups, self.head_dim).transpose(1, 2)
+            query_states = query_states.view(
+                bsz, -1, self.num_key_value_groups // self.split_ratio, self.head_dim
+            ).transpose(1, 2)
             key_states = key_states.view(bsz, -1, 1, self.head_dim).transpose(1, 2)
             value_states = value_states.view(bsz, -1, 1, self.head_dim).transpose(1, 2)
 
-            # for moe kv cache 
+            # for moe kv cache
             past_key_values_length = 0
             kv_seq_len = key_states.shape[-2]
             if past_key_value is not None:
@@ -1488,24 +1531,36 @@ class MixtralFlashAttention2MoE(MixtralFlashAttention2):
                         "for auto-regressive decoding with k/v caching, please make sure to initialize the attention class "
                         "with a layer index."
                     )
-                past_key_values_length = past_key_value.get_usable_length(kv_seq_len, self.layer_idx, expert_idx)  # 🔍 specify expert index
+                past_key_values_length = past_key_value.get_usable_length(
+                    kv_seq_len, self.layer_idx, expert_idx
+                )  # 🔍 specify expert index
                 kv_seq_len += past_key_values_length
-        
-            current_position_ids = torch.zeros((bsz, this_q_len), device=hidden_states.device, dtype=torch.long)
-            current_position_ids[current_batch_ids, current_seq_ids] = position_ids.expand(bsz, q_len).flatten()[top_x]
+
+            current_position_ids = torch.zeros(
+                (bsz, this_q_len), device=hidden_states.device, dtype=torch.long
+            )
+            current_position_ids[
+                current_batch_ids, current_seq_ids
+            ] = position_ids.expand(bsz, q_len).flatten()[top_x]
 
             if top_x.shape[0] > 0:  # apply only when there are tokens
-                cos, sin = self.rotary_emb(value_states, seq_len=current_position_ids.max().item() + 1)  # 🔍 adjust the seq_len to the maximum possible value
-                query_states, key_states = apply_rotary_pos_emb(query_states, key_states, cos, sin, current_position_ids)
+                cos, sin = self.rotary_emb(
+                    value_states, seq_len=current_position_ids.max().item() + 1
+                )  # 🔍 adjust the seq_len to the maximum possible value
+                query_states, key_states = apply_rotary_pos_emb(
+                    query_states, key_states, cos, sin, current_position_ids
+                )
 
             if past_key_value is not None:
                 cache_kwargs = {"sin": sin, "cos": cos}  # Specific to RoPE models
-                key_states, value_states = past_key_value.update(key_states, value_states, self.layer_idx, expert_idx, cache_kwargs)  # 🔍 specify expert index
+                key_states, value_states = past_key_value.update(
+                    key_states, value_states, self.layer_idx, expert_idx, cache_kwargs
+                )  # 🔍 specify expert index
 
             # print("attention_mask", attention_mask.shape, attention_mask)
             # for current attention mask
-            
-            '''
+
+            """
             current_attention_mask = torch.zeros((bsz, this_q_len), dtype=torch.bool, device=device)
 
             if attention_mask is not None:
@@ -1514,7 +1569,7 @@ class MixtralFlashAttention2MoE(MixtralFlashAttention2):
                     temp_attention_mask = attention_mask[:, previous_seen_tokens_total:].flatten()  # select along dimension 1 so that we get tokens in this iteration
                 else:
                     temp_attention_mask = attention_mask.flatten()  # flatten the dim
-                current_attention_mask[current_batch_ids, current_seq_ids] = temp_attention_mask[top_x]  # bug here !!! 
+                current_attention_mask[current_batch_ids, current_seq_ids] = temp_attention_mask[top_x]  # bug here !!!
 
             else:
                 current_attention_mask[current_batch_ids, current_seq_ids] = True  # assign masks sparsely
@@ -1522,7 +1577,7 @@ class MixtralFlashAttention2MoE(MixtralFlashAttention2):
             if past_key_value is not None:  # 🔍 we need to update with cached attention mask
                 current_attention_mask = past_key_value.update_attention_mask(current_attention_mask, self.layer_idx, expert_idx)
 
-            
+
             current_attention_mask = _prepare_4d_causal_attention_mask(
                 current_attention_mask,
                 (bsz, this_q_len),
@@ -1533,8 +1588,8 @@ class MixtralFlashAttention2MoE(MixtralFlashAttention2):
 
             if current_attention_mask.size() != (bsz, 1, this_q_len, kv_seq_len):  # 🔍 q_len -> this_q_len
                 raise ValueError(f"Attention mask should be of size {(bsz, 1, this_q_len, kv_seq_len)}, but is {current_attention_mask.size()}")
-            
-            '''
+
+            """
 
             # for sliding window
             use_sliding_windows = (
@@ -1591,7 +1646,7 @@ class MixtralFlashAttention2MoE(MixtralFlashAttention2):
                 if hasattr(self.config, "_pre_quantization_dtype"):
                     target_dtype = self.config._pre_quantization_dtype
                 else:
-                    target_dtype = self.q_proj.weight.dtype
+                    target_dtype = self.q_proj[0].weight.dtype
 
                 logger.warning_once(
                     f"The input hidden states seems to be silently casted in float32, this might be related to"
@@ -1609,7 +1664,7 @@ class MixtralFlashAttention2MoE(MixtralFlashAttention2):
             key_states = repeat_kv(key_states, repeat_num)
             value_states = repeat_kv(value_states, repeat_num)
 
-            # print("repeat_num", repeat_num)            
+            # print("repeat_num", repeat_num)
             # print("query_states shape", query_states.shape, key_states.shape, value_states.shape)
 
             # Reashape to the expected shape for Flash Attention
@@ -1625,11 +1680,17 @@ class MixtralFlashAttention2MoE(MixtralFlashAttention2):
                 this_q_len,
                 dropout=dropout_rate,
                 use_sliding_windows=use_sliding_windows,
-            )      
+            )
 
-            attn_output = attn_output.reshape(bsz, this_q_len, self.num_key_value_groups * self.head_dim).contiguous()
+            attn_output = attn_output.reshape(
+                bsz,
+                this_q_len,
+                self.num_key_value_groups * self.head_dim // self.split_ratio,
+            ).contiguous()
             attn_output = self.o_proj[expert_idx](attn_output)
-            attn_output = attn_output[current_batch_ids, current_seq_ids] * (routing_weights[top_x, idx, None] * self.scale_factor_attn)
+            attn_output = attn_output[current_batch_ids, current_seq_ids] * (
+                routing_weights[top_x, idx, None] * self.scale_factor_attn
+            )
 
             final_attn_output.index_add_(0, top_x, attn_output)
 
@@ -1637,9 +1698,13 @@ class MixtralFlashAttention2MoE(MixtralFlashAttention2):
 
         if not output_attentions:
             attn_weights = None
-        
-        return final_attn_output, attn_weights, past_key_value, router_logits  # 🔍 return an extra `router_logits`
 
+        return (
+            final_attn_output,
+            attn_weights,
+            past_key_value,
+            router_logits,
+        )  # 🔍 return an extra `router_logits`
 
 
 class MixtralFlashAttention2MoE_zt(MixtralFlashAttention2):
@@ -1658,17 +1723,28 @@ class MixtralFlashAttention2MoE_zt(MixtralFlashAttention2):
         self.kv_repeat_num = self.attn_hsz // (self.num_key_value_heads * self.head_dim)
         self.simulated_attn_head_num = self.attn_hsz // self.head_dim
         assert self.attn_hsz % (self.num_key_value_heads * self.head_dim) == 0
-        assert self.simulated_attn_head_num == self.num_heads * (self.top_k_attn / self.num_key_value_groups)
-        assert self.kv_repeat_num * self.num_key_value_heads == self.simulated_attn_head_num
+        assert self.simulated_attn_head_num == self.num_heads * (
+            self.top_k_attn / self.num_key_value_groups
+        )
+        assert (
+            self.kv_repeat_num * self.num_key_value_heads
+            == self.simulated_attn_head_num
+        )
 
         self.gate = nn.Linear(self.hidden_size, self.num_key_value_groups, bias=False)
         # tzhu: there are self.num_key_value_groups experts
         #       each expert has a size of self.attn_hsz
         self.q_proj = nn.ModuleList(
-            [nn.Linear(self.hidden_size, self.attn_hsz) for _ in range(self.num_key_value_groups)]
+            [
+                nn.Linear(self.hidden_size, self.attn_hsz)
+                for _ in range(self.num_key_value_groups)
+            ]
         )
         self.o_proj = nn.ModuleList(
-            [nn.Linear(self.attn_hsz, self.hidden_size) for _ in range(self.num_key_value_groups)]
+            [
+                nn.Linear(self.attn_hsz, self.hidden_size)
+                for _ in range(self.num_key_value_groups)
+            ]
         )
 
     def forward(
@@ -1698,7 +1774,9 @@ class MixtralFlashAttention2MoE_zt(MixtralFlashAttention2):
         # router
         router_logits = self.gate(viewed_hidden_states)
         router_scores = F.softmax(router_logits, dim=-1, dtype=torch.float)
-        routing_weights, selected_experts = torch.topk(router_scores, self.top_k_attn, dim=-1)
+        routing_weights, selected_experts = torch.topk(
+            router_scores, self.top_k_attn, dim=-1
+        )
         routing_weights /= routing_weights.sum(dim=-1, keepdim=True)
         routing_weights = routing_weights.to(hidden_states.dtype)
         query_states = torch.zeros(
@@ -1707,15 +1785,23 @@ class MixtralFlashAttention2MoE_zt(MixtralFlashAttention2):
             device=hidden_states.device,
         )
         # expert_mask: (num_experts, top_k_attn, bsz * q_len)
-        expert_mask = F.one_hot(selected_experts, num_classes=self.num_heads).permute(2, 1, 0)
+        expert_mask = F.one_hot(selected_experts, num_classes=self.num_heads).permute(
+            2, 1, 0
+        )
         for expert_idx in range(self.num_key_value_groups):
             expert_layer = self.q_proj[expert_idx]
             idx, top_x = torch.where(expert_mask[expert_idx])
             top_x_list = top_x.tolist()
             idx_list = idx.tolist()
-            expert_inputs = viewed_hidden_states[None, top_x_list].reshape(-1, self.hidden_size)
+            expert_inputs = viewed_hidden_states[None, top_x_list].reshape(
+                -1, self.hidden_size
+            )
             # inputs (-1, hidden_size) -> outputs (-1, attn_hsz)
-            expert_outs = expert_layer(expert_inputs) * routing_weights[top_x_list, idx_list, None] * self.scale_factor_attn
+            expert_outs = (
+                expert_layer(expert_inputs)
+                * routing_weights[top_x_list, idx_list, None]
+                * self.scale_factor_attn
+            )
             query_states.index_add_(0, top_x, expert_outs.to(query_states.dtype))
         query_states = query_states.view(bsz, q_len, self.attn_hsz)
         # query_states = query_states.view(
@@ -1848,8 +1934,14 @@ class MixtralFlashAttention2MoE_zt(MixtralFlashAttention2):
             top_x_list = top_x.tolist()
             idx_list = idx.tolist()
             expert_inputs = attn_output[None, top_x_list].reshape(-1, self.attn_hsz)
-            expert_outs = expert_layer(expert_inputs) * routing_weights[top_x_list, idx_list, None] * self.scale_factor_attn
-            final_attn_output.index_add_(0, top_x, expert_outs.to(final_attn_output.dtype))
+            expert_outs = (
+                expert_layer(expert_inputs)
+                * routing_weights[top_x_list, idx_list, None]
+                * self.scale_factor_attn
+            )
+            final_attn_output.index_add_(
+                0, top_x, expert_outs.to(final_attn_output.dtype)
+            )
         final_attn_output = final_attn_output.view(bsz, q_len, self.hidden_size)
 
         if not output_attentions:
@@ -1857,9 +1949,10 @@ class MixtralFlashAttention2MoE_zt(MixtralFlashAttention2):
 
         return final_attn_output, attn_weights, past_key_value, router_logits
 
-
     @torch.no_grad()
-    def from_vanilla_attention(attention: MixtralAttention, top_k_attn, scale_factor_attn):
+    def from_vanilla_attention(
+        attention: MixtralAttention, top_k_attn, scale_factor_attn
+    ):
         # config
         layer_idx = attention.layer_idx
         config = attention.config
@@ -1877,18 +1970,18 @@ class MixtralFlashAttention2MoE_zt(MixtralFlashAttention2):
             indices_q_o = []
             for j in range(attention_moe.num_key_value_heads):
                 k = i + j * num_key_value_groups
-                indices_q_o.extend(
-                    list(range(k * head_dim, (k + 1) * head_dim))
-                )
+                indices_q_o.extend(list(range(k * head_dim, (k + 1) * head_dim)))
 
             print(i, "indices_q_o", indices_q_o)
 
-            attention_moe.q_proj[i].weight.data = attention.q_proj.weight.data[indices_q_o].clone()
-            attention_moe.o_proj[i].weight.data = attention.o_proj.weight.data[:, indices_q_o].clone()
+            attention_moe.q_proj[i].weight.data = attention.q_proj.weight.data[
+                indices_q_o
+            ].clone()
+            attention_moe.o_proj[i].weight.data = attention.o_proj.weight.data[
+                :, indices_q_o
+            ].clone()
 
         return attention_moe
-
-
 
 
 class MixtralBLockSparseTop2MLP(nn.Module):
@@ -1923,128 +2016,6 @@ MISTRAL_ATTENTION_MOE_CLASSES = {
     "eager": MixtralAttentionMoE,
     "flash_attention_2": MixtralFlashAttention2MoE,
 }
-
-
-class SimplifiedSparseGLU(nn.Module):
-    def __init__(self, args: MegablocksArguments):
-        super().__init__()
-        self.args = args
-
-        if args.bf16:
-            torch_dtype = torch.bfloat16
-        elif args.fp16:
-            torch_dtype = torch.float16
-        else:
-            torch_dtype = None
-
-        # gate
-        self.w1 = nn.Parameter(
-            torch.empty(
-                args.ffn_hidden_size * args.moe_num_experts,
-                args.hidden_size,
-                dtype=torch_dtype,
-            )
-        )
-        # down
-        self.w2 = nn.Parameter(
-            torch.empty(
-                args.ffn_hidden_size * args.moe_num_experts,
-                args.hidden_size,
-                dtype=torch_dtype,
-            )
-        )
-        # up
-        self.v1 = nn.Parameter(
-            torch.empty(
-                args.ffn_hidden_size * args.moe_num_experts,
-                args.hidden_size,
-                dtype=torch_dtype,
-            )
-        )
-
-        self.act_fn = args.activation_fn
-
-    def forward(self, x, topo):
-        if self.args.memory_optimized_mlp:
-            raise NotImplementedError(
-                "Memory optimized implementation not yet supported with GLU with sparse kernels."
-            )
-
-        # TODO (tzhu): test if OOM comes from dtensor conversion
-        # TODO (tzhu): return x directly to see if it still encounters OOM
-        # w1, v1, w2 = (
-        #     resolve_dtensor(self.w1),
-        #     resolve_dtensor(self.v1),
-        #     resolve_dtensor(self.w2),
-        # )
-
-        # Compute the GLU.
-        x1 = stk.ops.sdd(x, self.w1.t(), topo)
-        x2 = stk.ops.sdd(x, self.v1.t(), topo)
-
-        activation_fn_out = act_fn(x1, self.act_fn)
-        x1 = stk.ops.mul(activation_fn_out, x2)
-
-        return stk.ops.dsd(x1, self.w2)
-
-
-class SimplifiedGroupedSparseGLU(SimplifiedSparseGLU):
-    def forward(self, x, tokens_per_expert):
-        batch_sizes = tokens_per_expert.cpu().to(torch.long)
-        # w1, v1, w2 = (
-        #     resolve_dtensor(self.w1),
-        #     resolve_dtensor(self.v1),
-        #     resolve_dtensor(self.w2),
-        # )
-
-        # Re-shape the weights for the grouped GEMMs.
-        # ne = mpu.experts_per_rank(self.args)
-        # w1 = self.w1.view(ne, -1, self.args.hidden_size)
-        # v1 = self.v1.view(ne, -1, self.args.hidden_size)
-        # w2 = self.w2.view(ne, -1, self.args.hidden_size)
-
-        ne = self.args.moe_num_experts
-        w1 = self.w1.view(ne, -1, self.args.hidden_size)
-        v1 = self.v1.view(ne, -1, self.args.hidden_size)
-        w2 = self.w2.view(ne, -1, self.args.hidden_size)
-
-        if self.args.memory_optimized_mlp:
-            return memory_optimized_grouped_glu(
-                x,
-                w1,
-                v1,
-                w2,
-                batch_sizes,
-                self.args.quantize_inputs_num_bits,
-                self.args.quantize_rematerialize_num_bits,
-                self.args.activation_fn,
-            )
-
-        # Compute the MLP.
-        x1 = gg.ops.gmm(x, w1, batch_sizes, trans_b=True)
-        x2 = gg.ops.gmm(x, v1, batch_sizes, trans_b=True)
-        x1 = self.act_fn(x1) * x2
-        return gg.ops.gmm(x1, w2, batch_sizes)
-
-
-_REGISTRY["simplified_glu"] = {
-    "grouped": SimplifiedGroupedSparseGLU,
-    "sparse": SimplifiedSparseGLU,
-}
-
-
-class SimplifiedParallelDroplessMLP(ParallelDroplessMLP):
-    def forward(self, x, expert_weights, top_experts):
-        in_shape = x.size()
-
-        # Compute the experts.
-        x, tokens_per_expert = self.forward_fn(x, expert_weights, top_experts)
-        x = x.view(in_shape)
-        if self.bias is not None:
-            if self.args.return_bias:
-                return x, self.bias
-            return x + self.bias
-        return x
 
 
 class MixtralSparseMoeBlock(nn.Module):
@@ -2084,39 +2055,6 @@ class MixtralSparseMoeBlock(nn.Module):
                     for _ in range(self.num_experts)
                 ]  # 🔍
             )
-        elif self.moe_type == "megablocks":
-            if config.add_rescale_bias:
-                raise NotImplementedError(
-                    "RescaleBias not yet supported with megablocks."
-                )
-            is_fp16 = self.gate.weight.dtype == torch.float16
-            is_bf16 = self.gate.weight.dtype == torch.bfloat16
-            args = MegablocksArguments(
-                hidden_size=self.hidden_dim,
-                ffn_hidden_size=self.ffn_dim,
-                moe_num_experts=self.num_experts,
-                moe_top_k=self.top_k,
-                activation_fn={"silu": F.silu}[config.hidden_act],
-                mlp_type="simplified_glu",
-                mlp_impl="sparse",
-                memory_optimized_mlp=False,
-                bias=False,
-                fp16=is_fp16,
-                bf16=is_bf16,
-            )
-            self.experts = SimplifiedParallelDroplessMLP(args)
-        elif self.moe_type == "scattermoe":
-            if config.add_rescale_bias:
-                raise NotImplementedError(
-                    "RescaleBias not yet supported with scattermoe."
-                )
-            self.experts = scattermoe.mlp.GLUMLP(
-                input_size=self.hidden_dim,
-                hidden_size=self.ffn_dim,
-                num_experts=self.num_experts,
-                top_k=self.top_k,
-                activation={"silu": F.silu}[config.hidden_act],
-            )
         else:
             raise NotImplementedError(f"Unsupported moe_type: {self.moe_type}")
 
@@ -2133,54 +2071,45 @@ class MixtralSparseMoeBlock(nn.Module):
         # we cast back to the input dtype
         routing_weights = routing_weights.to(hidden_states.dtype)
 
-        if self.moe_type == "megablocks":
-            final_hidden_states = self.experts(
-                hidden_states, routing_weights, selected_experts
+        final_hidden_states = torch.zeros(
+            (batch_size * sequence_length, hidden_dim),
+            dtype=hidden_states.dtype,
+            device=hidden_states.device,
+        )
+
+        # One hot encode the selected experts to create an expert mask
+        # this will be used to easily index which expert is going to be sollicitated
+        expert_mask = torch.nn.functional.one_hot(
+            selected_experts, num_classes=self.num_experts
+        ).permute(2, 1, 0)
+
+        # Loop over all available experts in the model and perform the computation on each expert
+        for expert_idx in range(self.num_experts):
+            expert_layer = self.experts[expert_idx]
+            idx, top_x = torch.where(expert_mask[expert_idx])
+
+            if (
+                top_x.shape[0] == 0 and not self.training
+            ):  # skip during training will lead to asynchrony among different GPUs and blocks the training!
+                continue
+
+            # in torch it is faster to index using lists than torch tensors
+            top_x_list = top_x.tolist()
+            idx_list = idx.tolist()
+
+            # Index the correct hidden states and compute the expert hidden state for
+            # the current expert. We need to make sure to multiply the output hidden
+            # states by `routing_weights` on the corresponding tokens (top-1 and top-2)
+            current_state = hidden_states[None, top_x_list].reshape(-1, hidden_dim)
+            current_hidden_states = expert_layer(current_state) * (
+                routing_weights[top_x_list, idx_list, None] * self.scale_factor
             )
-        elif self.moe_type == "scattermoe":
-            final_hidden_states = self.experts(
-                hidden_states, routing_weights, selected_experts
+
+            # However `index_add_` only support torch tensors for indexing so we'll use
+            # the `top_x` tensor here.
+            final_hidden_states.index_add_(
+                0, top_x, current_hidden_states.to(hidden_states.dtype)
             )
-        else:
-            final_hidden_states = torch.zeros(
-                (batch_size * sequence_length, hidden_dim),
-                dtype=hidden_states.dtype,
-                device=hidden_states.device,
-            )
-
-            # One hot encode the selected experts to create an expert mask
-            # this will be used to easily index which expert is going to be sollicitated
-            expert_mask = torch.nn.functional.one_hot(
-                selected_experts, num_classes=self.num_experts
-            ).permute(2, 1, 0)
-
-            # Loop over all available experts in the model and perform the computation on each expert
-            for expert_idx in range(self.num_experts):
-                expert_layer = self.experts[expert_idx]
-                idx, top_x = torch.where(expert_mask[expert_idx])
-
-                if (
-                    top_x.shape[0] == 0 and not self.training
-                ):  # skip during training will lead to asynchrony among different GPUs and blocks the training!
-                    continue
-
-                # in torch it is faster to index using lists than torch tensors
-                top_x_list = top_x.tolist()
-                idx_list = idx.tolist()
-
-                # Index the correct hidden states and compute the expert hidden state for
-                # the current expert. We need to make sure to multiply the output hidden
-                # states by `routing_weights` on the corresponding tokens (top-1 and top-2)
-                current_state = hidden_states[None, top_x_list].reshape(-1, hidden_dim)
-                current_hidden_states = expert_layer(current_state) * (
-                    routing_weights[top_x_list, idx_list, None] * self.scale_factor
-                )
-
-                # However `index_add_` only support torch tensors for indexing so we'll use
-                # the `top_x` tensor here.
-                final_hidden_states.index_add_(
-                    0, top_x, current_hidden_states.to(hidden_states.dtype)
-                )
 
         final_hidden_states = final_hidden_states.reshape(
             batch_size, sequence_length, hidden_dim
@@ -2205,7 +2134,6 @@ class MixtralDecoderLayer(nn.Module):
         else:
             attn_class = MISTRAL_ATTENTION_CLASSES[config._attn_implementation]
         self.self_attn = attn_class(config, layer_idx)
-
 
         if self.is_moe:
             self.block_sparse_moe = MixtralSparseMoeBlock(config)
@@ -2306,7 +2234,7 @@ class MixtralDecoderLayer(nn.Module):
             router_logits = None
 
         if self.mlp_residual is not None:
-            hidden_states += self.mlp_residual(hidden_states_input)  #     
+            hidden_states += self.mlp_residual(hidden_states_input)  #
 
         hidden_states = residual + hidden_states
 
@@ -3133,7 +3061,8 @@ class MixtralForCausalLM(MixtralPreTrainedModel):
             if past is None:
                 if self.config.use_attn_moe:  # 🔍
                     model_kwargs["past_key_values"] = MoECache(
-                        self.config.num_key_value_heads
+                        # self.config.num_key_value_heads
+                        self.config.attn_experts
                     )
                 else:  # 🔍
                     model_kwargs["past_key_values"] = DynamicCache()

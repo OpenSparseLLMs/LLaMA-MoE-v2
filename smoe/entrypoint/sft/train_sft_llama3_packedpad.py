@@ -1,5 +1,6 @@
-import os
+import copy
 import math
+import os
 import pathlib
 import random
 from dataclasses import dataclass, field
@@ -16,7 +17,7 @@ from transformers.trainer_pt_utils import LabelSmoother
 import smoe.models.mixtral.modeling_mixtral as ModelingMixtralResidual
 from smoe.models.mixtral import MixtralConfig, MixtralForCausalLM
 from smoe.utils.conversation import Llama3ConversationTemplate
-from smoe.utils.io import load_json, load_jsonlines, get_pathname_from_name_or_path
+from smoe.utils.io import get_pathname_from_name_or_path, load_json, load_jsonlines
 
 IGNORE_TOKEN_ID = LabelSmoother.ignore_index
 
@@ -254,7 +255,6 @@ class TokenizedSupervisedDataset(Dataset):
         self.labels = labels
         self.attention_mask = attention_mask
 
-
     @staticmethod
     def load_from_raw_dset(
         tokenizer: PreTrainedTokenizer,
@@ -275,37 +275,46 @@ class TokenizedSupervisedDataset(Dataset):
         """
         logger.info("Loading from raw dataset ...")
         dset = load_jsonlines(data_path)
-        conversations=[conv['conversations'] for conv in dset]
+        conversations = [conv["conversations"] for conv in dset]
 
-        prompt, source_part = Llama3ConversationTemplate.parse_list(conversations, skip_system=True)
-        
-        logger.info("Generating inputs ...")
+        sources, groups = Llama3ConversationTemplate.parse_group_list(
+            conversations, skip_system=True
+        )
+
         # Tokenize conversations
+        flat_sources = [item for sublist in sources for item in sublist]
         res_conv = tokenizer(
-            prompt,
+            flat_sources,
             # return_tensors="pt",
             padding=False,
             max_length=tokenizer.model_max_length,
             truncation=True,
         )
-        
-        input_ids = [torch.tensor(inputs, dtype=torch.int64) for inputs in res_conv["input_ids"]]
-        import copy
 
-        targets = copy.deepcopy(input_ids)
+        logger.info("Generating inputs ...")
+        input_ids = []
+        id_num = 0
+        for group in groups:
+            input_id = []
+            for _ in group:
+                input_id.extend(res_conv["input_ids"][id_num][1:])
+                id_num += 1
+            if len(input_id) < tokenizer.model_max_length - 1:
+                input_ids.append(torch.tensor([128000] + input_id, dtype=torch.int64))
 
         logger.info("Generating labels ...")
-        res_source = tokenizer(
-            source_part,
-            # return_tensors="pt",
-            padding=False,
-            max_length=tokenizer.model_max_length,
-            truncation=True,
-        )
-    
-        for i in range(len(targets)):
-            source_length = len(res_source["input_ids"][i])
-            targets[i][:source_length] = -100  
+        targets = []
+        id_num = 0
+        for group in groups:
+            target = []
+            for role in group:
+                if role == "user":
+                    target.extend([-100] * (len(res_conv["input_ids"][id_num]) - 1))
+                else:
+                    target.extend(res_conv["input_ids"][id_num][1:])
+                id_num += 1
+            if len(input_id) < tokenizer.model_max_length - 1:
+                targets.append(torch.tensor([-100] + target, dtype=torch.int64))
 
         logger.info("Generating masks ...")
         attention_masks = [input_id_seq.ne(-100) for input_id_seq in input_ids]
@@ -314,7 +323,7 @@ class TokenizedSupervisedDataset(Dataset):
             tokenizer=tokenizer,
             input_ids=input_ids,
             labels=targets,
-            attention_mask=attention_masks
+            attention_mask=attention_masks,
         )
 
     def __len__(self):
@@ -377,9 +386,7 @@ class TokenizedSupervisedDataset(Dataset):
                     torch.tensor([self.tokenizer.pad_token_id] * pad_len),
                 ]
             )
-            self.labels[i] = torch.cat(
-                [self.labels[i], torch.tensor([-100] * pad_len)]
-            )
+            self.labels[i] = torch.cat([self.labels[i], torch.tensor([-100] * pad_len)])
             self.attention_mask[i] = torch.cat(
                 [self.attention_mask[i], torch.tensor([0] * pad_len)]
             )
@@ -565,7 +572,6 @@ class PackedDataset(Dataset):
             "labels": torch.tensor(label_ids),
             "attention_mask": torch.tensor(attention_mask),
         }
-    
 
     def stat(self) -> None:
         """Print out the statistics of the packed dataset.
@@ -616,36 +622,29 @@ def make_supervised_dset(
     local_rank = int(os.environ.get("LOCAL_RANK", 0))
 
     parent_path = os.path.dirname(data_path)
-    ds_pathname =  get_pathname_from_name_or_path(data_path)
+    ds_pathname = get_pathname_from_name_or_path(data_path)
     tokenizer_pathname = get_pathname_from_name_or_path(tokenizer.name_or_path)
     # data_cache_path = os.path.join(
     #     parent_path,
     #     f"{ds_pathname}-{tokenizer_pathname}-tokenized.pt"
     # )
-    data_cache_path = os.path.join(
-        parent_path,
-        f"{ds_pathname}-tokenized.pt"
-    )
+    data_cache_path = os.path.join(parent_path, f"{ds_pathname}-tokenized.pt")
     if not os.path.exists(data_cache_path):
         from torch.distributed import barrier
+
         # If this is not rank 0, stay here, wait for rank 0 to process the data
         if local_rank != 0:
             print(
                 f"[Process {local_rank}] Waiting for main process to prepare the training data"
             )
             barrier()  # When TORCH_NCCL_BLOCKING_WAIT is set, the process will block and wait for this timeout.
-            logger.info(
-                f"[Process {local_rank}] Loading data from {data_cache_path}"
-            )
+            logger.info(f"[Process {local_rank}] Loading data from {data_cache_path}")
             train_dataset = torch.load(data_cache_path)
         else:  # Rank 0 processes the data and saves to `data_cache_path`
             # The way we read dataset is:
             # Rank 0 will process the dataset and save the result to data_cache_path, other ranks will read from the data_cache_path
-            train_dataset = (
-                TokenizedSupervisedDataset.load_from_raw_dset(
-                    tokenizer=tokenizer,
-                    data_path=data_path
-                )
+            train_dataset = TokenizedSupervisedDataset.load_from_raw_dset(
+                tokenizer=tokenizer, data_path=data_path
             )
             torch.save(train_dataset, data_cache_path)
 
@@ -658,6 +657,10 @@ def make_supervised_dset(
     else:  # Cache existing
         logger.info(f"[Process {local_rank}] Loading data from {data_cache_path}")
         train_dataset = torch.load(data_cache_path)
+        total_tokens = 0
+        for tensor in train_dataset:
+            total_tokens += torch.numel(tensor["input_ids"])
+        logger.info(f"Total number of tokens in the model:{total_tokens}")
 
     # Shuffle the dataset if necessary
     logger.debug(f"Shuffle seed ...")
@@ -856,10 +859,17 @@ def train():
             if ".gate." in name:
                 param.requires_grad = False
     tot_params = 0
+    act_params = 0
     for name, param in model.named_parameters():
         # logger.info(name, param.shape, param.numel())
         tot_params += param.numel()
+        if "block_sparse_moe" in name:
+            if "experts.0" in name or "experts.1" in name:
+                act_params += param.numel()
+        else:
+            act_params += param.numel()
     logger.info(f"Total model params: {tot_params}")
+    logger.info(f"Activate model params: {act_params}")
 
     # train_dataset = None
     datapath = pathlib.Path(data_args.dataset_dir_or_path)
@@ -913,21 +923,4 @@ def train():
 
 
 if __name__ == "__main__":
-    
     train()
-
-    # from tqdm import tqdm
-    # tokenizer = get_tokenizer("resources/llama-3-8b-mixtral-megablocks-56e-top8")
-    # train_dataset = CachedJsonlDataset(
-    #     "resources/OpenHermes-2.5/openhermes2_5.jsonl",
-    #     tokenizer,
-    #     seed=1227,
-    # )
-    # tok_lens = []
-    # for ins in tqdm(train_dataset):
-    #     tok_lens.append(ins["input_ids"].shape[0])
-    # print(np.mean(tok_lens), np.std(tok_lens))
-    # import matplotlib.pyplot as plt
-    # plt.hist(tok_lens, bins=100)
-    # plt.savefig("tok_lens.png")
-    # plt.close()

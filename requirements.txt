@@ -1,5 +1,5 @@
 accelerate==0.32.0
-datasets==2.20.0
+datasets==2.16.0
 debugpy==1.8.2
 deepspeed==0.14.4
 huggingface-hub==0.23.4

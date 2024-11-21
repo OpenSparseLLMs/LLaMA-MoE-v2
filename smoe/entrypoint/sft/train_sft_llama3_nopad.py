@@ -12,15 +12,10 @@ from torch.utils.data import Dataset
 from transformers import PreTrainedTokenizer, Trainer
 from transformers.trainer_pt_utils import LabelSmoother
 
+import smoe.models.mixtral.modeling_mixtral as ModelingMixtralResidual
 from smoe.models.mixtral import MixtralConfig, MixtralForCausalLM
-from smoe.models.mixtral_residual.configuration_mixtral_residual import (
-    MixtralResidualConfig,
-)
-from smoe.models.mixtral_residual.modeling_mixtral_residual import (
-    MixtralResidualForCausalLM,
-)
 from smoe.utils.conversation import Llama3ConversationTemplate
-from smoe.utils.io import load_json, load_jsonlines
+from smoe.utils.io import get_pathname_from_name_or_path, load_json, load_jsonlines
 
 IGNORE_TOKEN_ID = LabelSmoother.ignore_index
 
@@ -124,7 +119,9 @@ def preprocess(
 ) -> Dict:
     # Apply prompt templates
 
-    prompt, source_part = Llama3ConversationTemplate.parse(instances["conversations"], skip_system=True)
+    prompt, source_part = Llama3ConversationTemplate.parse(
+        instances["conversations"], skip_system=True
+    )
 
     # Tokenize conversations
     res_conv = tokenizer(
@@ -342,9 +339,6 @@ def get_model(
     elif model_type == "v2_mixtral":
         ConfigClass = MixtralConfig
         ModelClass = MixtralForCausalLM
-    elif model_type == "v2_mixtral_residual":
-        ConfigClass = MixtralResidualConfig
-        ModelClass = MixtralResidualForCausalLM
     else:
         raise ValueError(f"Unknown model type: {model_type}")
 
@@ -506,19 +500,3 @@ def train():
 
 if __name__ == "__main__":
     train()
-
-    # from tqdm import tqdm
-    # tokenizer = get_tokenizer("resources/llama-3-8b-mixtral-megablocks-56e-top8")
-    # train_dataset = CachedJsonlDataset(
-    #     "resources/OpenHermes-2.5/openhermes2_5.jsonl",
-    #     tokenizer,
-    #     seed=1227,
-    # )
-    # tok_lens = []
-    # for ins in tqdm(train_dataset):
-    #     tok_lens.append(ins["input_ids"].shape[0])
-    # print(np.mean(tok_lens), np.std(tok_lens))
-    # import matplotlib.pyplot as plt
-    # plt.hist(tok_lens, bins=100)
-    # plt.savefig("tok_lens.png")
-    # plt.close()
