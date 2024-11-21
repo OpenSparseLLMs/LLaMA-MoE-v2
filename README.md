@@ -1,5 +1,5 @@
 <div align="center">
-  <h1>LLaMA-MoE: Building Mixture-of-Experts from LLaMA with Continual Pre-training</h1>
+  <h1>Understanding Sparsity of LLaMA from Perspective of Mixture-of-Experts with Post-Training</h1>
   <img src="docs/imgs/title.webp" width="200" alt="LLaMA-MoE favicon" style="border-radius: 5%;"><br />
   <span style="color:red">📢 <strong><i>A SMALLER AFFORDABLE MoE MODEL FOR EVERYONE!!</i></strong></span>
   <div>
