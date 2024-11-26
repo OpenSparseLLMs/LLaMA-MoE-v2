@@ -103,8 +103,8 @@ print(tokenizer.decode(pred.cpu()[0], skip_special_tokens=True))
 
 | Model                     | \#Activated Experts | \#Experts | \#Activated Params |                      SFT Model                                  |
 | :------------------------ | :-----------------: | :-------: | :----------------: | :------------------------------------: |
-| **LLaMA-MLP-MoE (2/8)**  |          2          |     8     |        3.8B        | [🤗 SFT](https://huggingface.co/LLaMA-MoE-v2/LLaMA-MoE-v2-3_5B-2_8)    |
-| **LLaMA-MLP-MoE (1+1/7)**|          2          |     8     |        3.8B        | [🤗 SFT](https://huggingface.co/LLaMA-MoE-v2/LLaMA-MoE-v2-3_5B-1_1_7)  |
+| **LLaMA-MLP-MoE (2/8)**  |          2          |     8     |        3.8B        | [🤗 SFT](https://huggingface.co/llama-moe/LLaMA-MoE-v2-3_8B-2_8-sft)    |
+| **LLaMA-MLP-MoE (1+1/7)**|          2          |     8     |        3.8B        | [🤗 SFT](https://huggingface.co/llama-moe/LLaMA-MoE-v2-3_8B-residual-sft)  |
 
 
 
@@ -137,7 +137,7 @@ For more information, please refer to [Expert Construction docs](docs/expert_con
 
 - **NOTICE:** Please create `logs/` folder manually: `mkdir -p logs`
 
-  We provide simple examples of SFT to build chatbots. Please refer to [SFT docs](docs/supervised_fine_tuning/LLaMA-MoE-v2.md) and `/mnt/petrelfs/zhutong/smoe/scripts/sft` for more details.
+  We provide simple examples of SFT to build chatbots. Please refer to [SFT docs](docs/supervised_fine_tuning/LLaMA-MoE-v2.md) for more details.
 
 
 
