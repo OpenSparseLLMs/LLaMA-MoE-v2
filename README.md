@@ -1,6 +1,6 @@
 <div align="center">
   <h1>Understanding Sparsity of LLaMA from Perspective of Mixture-of-Experts with Post-Training</h1>
-  <img src="docs/imgs/title.webp" width="200" alt="LLaMA-MoE favicon" style="border-radius: 5%;"><br />
+  <img src="docs/imgs/title-favicon.png" width="200" alt="LLaMA-MoE favicon" style="border-radius: 5%;"><br />
   <span style="color:red">📢 <strong><i>A SMALLER AFFORDABLE MoE MODEL FOR EVERYONE!!</i></strong></span>
   <div>
     <a href="https://huggingface.co/LLaMA-MoE-v2" target="_blank">🤗 Model Weights</a> | <a href="#quick-start">🚀 Quick Start</a> | <a href="#installation">⚙️ Installation Guide</a> | <a href="#expert-construction">🚧 Expert Construction</a> | <a href="#sft">💬 Supervised Fine-Tuning (SFT)</a> | <a href="#evaluation">💎 Evaluation</a>
