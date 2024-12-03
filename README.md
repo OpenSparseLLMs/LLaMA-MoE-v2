@@ -8,6 +8,14 @@
   </div>
 </div>
 
+
+
+
+<h2 id="updates">🚀 Updates</h2>
+
+📆[2024-12-03] 🎈 We scale the training data to 8.4B token and release the new MLP-MoE (8top2) model. The new model can achieve near 59.6 on GSM8K and 57.1 on HumanEval.  
+
+
 <h2 id="llama-moe">🎉 Introduction</h2>
 
 LLaMA-MoE-v2 is a series of open-sourced Mixture-of-Expert (MoE) models based on [LLaMA3](https://github.com/facebookresearch/llama).
@@ -108,7 +116,7 @@ print(tokenizer.decode(pred.cpu()[0], skip_special_tokens=True))
 
 
 
-| Model | #tokens | MMLU(5) | GSM8k(8) | HumanEval | IFEval | BoolQ(32) | SciQ | PIQA | ARC-c(25) | TruthfulQA | HellaSwag(10) |
+| Model | #Training Tokens | MMLU(5) | GSM8k(8) | HumanEval(pass@10) | IFEval | BoolQ(32) | SciQ | PIQA | ARC-c(25) | TruthfulQA | HellaSwag(10) |
 |:---|:---:|:---:|:---:|:---:|:---:|:---:|:---:|:---:|:---:|:---:|:---:|
 | [LLaMA3-8B](https://huggingface.co/meta-llama/Meta-Llama-3-8B-Instruct) | 15T | 67.2 | 76.5 | 71.4 | 76.5 | 83.0 | 93.2 | 78.5 | 61.9 | 51.7 | 78.8 |
 | [INCITE-3B](https://huggingface.co/togethercomputer/RedPajama-INCITE-Instruct-3B-v1) | 1T | 25.1 | 2.1 | 6.92 | 30.1 | 66.5 | 94.7 | 74.4 | 40.2 | 36.4 | 65.6 |
@@ -119,8 +127,9 @@ print(tokenizer.decode(pred.cpu()[0], skip_special_tokens=True))
 | [OpenMoE-3B-9B](https://huggingface.co/OrionZheng/openmoe-8b-chat) | 1T | 26.5 | 1.36 | 1.01 | 31.2 | 61.7 | 68.4 | 65.7 | 33.3 | 40.5 | 56.5 |
 | [LLaMA-MoE-3B-7B](https://huggingface.co/llama-moe/LLaMA-MoE-v1-3_5B-2_8-sft) | 200B | 28.2 | 4.62 | 12.0 | 28.1 | 68.1 | 88.8 | 77.9 | 44.0 | 33.3 | 73.2 |
 | [OLMoE-1B-7B](https://huggingface.co/allenai/OLMoE-1B-7B-0924-SFT) | 1T | 53.8 | 40.9 | 40.5 | 35.5 | 80.9 | 94.9 | 80.1 | 55.6 | 43.3 | 79.6 |
-| **MLP-MoE (8top2)** | **7B** | 40.6 | 53.1 | **53.5** | 32.7 | 74.6 | 90.6 | 69.3 | 42.8 | 45.6 | 59.0 |
-| **MLP-MoE (1+7top1)** | **7B** | 42.7 | **55.0** | 51.2 | **36.0** | 76.9 | 88.8 | 67.9 | 40.2 | 46.9 | 53.7 |
+| **MLP-MoE (8top2)** | **7B** | 40.6 | 53.1 | 53.5 | 32.7 | 74.6 | 90.6 | 69.3 | 42.8 | 45.6 | 59.0 |
+| **MLP-MoE (8top2)** | **8.4B** | 41.0 | **59.6** | **57.1** | 31.7 | 74.5 | 90.2 | 69.5 | 43.3 | 46.9 | 58.1 |
+| **MLP-MoE (1+7top1)** | **7B** | 42.7 | 55.0 | 51.2 | **36.0** | 76.9 | 88.8 | 67.9 | 40.2 | 46.9 | 53.7 |
 
 
 
