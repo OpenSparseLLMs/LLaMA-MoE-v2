@@ -3,15 +3,16 @@ import importlib
 import inspect
 import math
 import warnings
+from packaging import version
 from dataclasses import dataclass
 from typing import Any, Callable, Dict, Iterable, List, Optional, Tuple, Union
 
-import stk
 import torch
 import torch.distributed as dist
 import torch.nn.functional as F
 import torch.utils.checkpoint
-from packaging import version
+from megablocks.layers.arguments import Arguments as MBArgs
+from megablocks.layers.dmoe import ParallelDroplessMLP
 from torch import nn
 from torch.nn import BCEWithLogitsLoss, CrossEntropyLoss, MSELoss
 from transformers import (
@@ -1725,6 +1726,19 @@ class MixtralBLockSparseTop2MLP(nn.Module):
         return current_hidden_states
 
 
+class ParallelDroplessMLPWithoutLBLSaving(ParallelDroplessMLP):
+    def forward(self, x, expert_weights, top_experts):
+        in_shape = x.size()
+        # Compute the experts.
+        x, _ = self.forward_fn(x, expert_weights, top_experts)
+        x = x.view(in_shape)
+        if self.bias is not None:
+            if self.args.return_bias:
+                return x, self.bias
+            return x + self.bias
+        return x
+
+
 MISTRAL_ATTENTION_CLASSES = {
     "eager": MixtralAttention,
     "flash_attention_2": MixtralFlashAttention2,
@@ -1774,6 +1788,27 @@ class MixtralSparseMoeBlock(nn.Module):
                     for _ in range(self.num_experts)
                 ]  # 🔍
             )
+        elif self.moe_type == "megablocks":
+            config: MixtralConfig
+            is_fp16 = self.gate.weight.data.dtype == torch.float16
+            is_bf16 = self.gate.weight.data.dtype == torch.bfloat16
+            mb_args = MBArgs(
+                hidden_size=config.hidden_size,
+                ffn_hidden_size=config.intermediate_size,
+                num_layers=config.num_hidden_layers,
+                bias=False,
+                return_bias=False,
+                activation_fn=nn.SiLU(),
+                moe_num_experts=config.num_local_experts,
+                moe_top_k=config.num_experts_per_tok,
+                memory_optimized_mlp=False,
+                mlp_type='glu',
+                mlp_impl='sparse',
+                fp16=is_fp16,
+                bf16=is_bf16,
+                device=torch.cuda.current_device(),
+            )
+            self.experts = ParallelDroplessMLPWithoutLBLSaving(mb_args)
         else:
             raise NotImplementedError(f"Unsupported moe_type: {self.moe_type}")
 
@@ -1790,45 +1825,50 @@ class MixtralSparseMoeBlock(nn.Module):
         # we cast back to the input dtype
         routing_weights = routing_weights.to(hidden_states.dtype)
 
-        final_hidden_states = torch.zeros(
-            (batch_size * sequence_length, hidden_dim),
-            dtype=hidden_states.dtype,
-            device=hidden_states.device,
-        )
-
-        # One hot encode the selected experts to create an expert mask
-        # this will be used to easily index which expert is going to be sollicitated
-        expert_mask = torch.nn.functional.one_hot(
-            selected_experts, num_classes=self.num_experts
-        ).permute(2, 1, 0)
-
-        # Loop over all available experts in the model and perform the computation on each expert
-        for expert_idx in range(self.num_experts):
-            expert_layer = self.experts[expert_idx]
-            idx, top_x = torch.where(expert_mask[expert_idx])
-
-            if (
-                top_x.shape[0] == 0 and not self.training
-            ):  # skip during training will lead to asynchrony among different GPUs and blocks the training!
-                continue
-
-            # in torch it is faster to index using lists than torch tensors
-            top_x_list = top_x.tolist()
-            idx_list = idx.tolist()
-
-            # Index the correct hidden states and compute the expert hidden state for
-            # the current expert. We need to make sure to multiply the output hidden
-            # states by `routing_weights` on the corresponding tokens (top-1 and top-2)
-            current_state = hidden_states[None, top_x_list].reshape(-1, hidden_dim)
-            current_hidden_states = expert_layer(current_state) * (
-                routing_weights[top_x_list, idx_list, None] * self.scale_factor
+        if self.moe_type == "modulelist":
+            final_hidden_states = torch.zeros(
+                (batch_size * sequence_length, hidden_dim),
+                dtype=hidden_states.dtype,
+                device=hidden_states.device,
             )
 
-            # However `index_add_` only support torch tensors for indexing so we'll use
-            # the `top_x` tensor here.
-            final_hidden_states.index_add_(
-                0, top_x, current_hidden_states.to(hidden_states.dtype)
-            )
+            # One hot encode the selected experts to create an expert mask
+            # this will be used to easily index which expert is going to be sollicitated
+            expert_mask = torch.nn.functional.one_hot(
+                selected_experts, num_classes=self.num_experts
+            ).permute(2, 1, 0)
+
+            # Loop over all available experts in the model and perform the computation on each expert
+            for expert_idx in range(self.num_experts):
+                expert_layer = self.experts[expert_idx]
+                idx, top_x = torch.where(expert_mask[expert_idx])
+
+                if (
+                    top_x.shape[0] == 0 and not self.training
+                ):  # skip during training will lead to asynchrony among different GPUs and blocks the training!
+                    continue
+
+                # in torch it is faster to index using lists than torch tensors
+                top_x_list = top_x.tolist()
+                idx_list = idx.tolist()
+
+                # Index the correct hidden states and compute the expert hidden state for
+                # the current expert. We need to make sure to multiply the output hidden
+                # states by `routing_weights` on the corresponding tokens (top-1 and top-2)
+                current_state = hidden_states[None, top_x_list].reshape(-1, hidden_dim)
+                current_hidden_states = expert_layer(current_state) * (
+                    routing_weights[top_x_list, idx_list, None] * self.scale_factor
+                )
+
+                # However `index_add_` only support torch tensors for indexing so we'll use
+                # the `top_x` tensor here.
+                final_hidden_states.index_add_(
+                    0, top_x, current_hidden_states.to(hidden_states.dtype)
+                )
+        elif self.moe_type == "megablocks":
+            final_hidden_states = self.experts(hidden_states, routing_weights, selected_experts)
+        else:
+            raise NotImplementedError(f"Unsupported moe_type: {self.moe_type}")
 
         final_hidden_states = final_hidden_states.reshape(
             batch_size, sequence_length, hidden_dim
