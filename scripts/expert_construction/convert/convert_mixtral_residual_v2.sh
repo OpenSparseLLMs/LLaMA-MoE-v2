@@ -13,7 +13,6 @@
 #SBATCH --gres=gpu:0
 #SBATCH --quotatype=auto
 
-# reserved spot auto
 
 {
   model_path="/mnt/petrelfs/share_data/quxiaoye/models/Meta-Llama-3-8B-Instruct"
